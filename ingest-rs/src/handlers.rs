@@ -1,4 +1,5 @@
 use axum::{http::StatusCode, Json};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::pipeline::process_event;
@@ -16,12 +17,11 @@ pub struct SingleResponse {
 }
 
 /// Response for batch endpoints.
-/// NOTE: This is deliberately missing a `processed_at` field — that's the demo
-/// issue the agent will fix.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BatchResponse {
     pub count: usize,
     pub results: Vec<String>,
+    pub processed_at: DateTime<Utc>,
 }
 
 /// Request wrapper for typed event ingestion.
@@ -110,6 +110,7 @@ pub async fn ingest_github_batch(
     Ok(Json(BatchResponse {
         count: results.len(),
         results,
+        processed_at: Utc::now(),
     }))
 }
 
@@ -183,6 +184,7 @@ pub async fn ingest_stripe_batch(
     Ok(Json(BatchResponse {
         count: results.len(),
         results,
+        processed_at: Utc::now(),
     }))
 }
 
@@ -252,6 +254,7 @@ pub async fn ingest_custom_batch(
     Ok(Json(BatchResponse {
         count: results.len(),
         results,
+        processed_at: Utc::now(),
     }))
 }
 
@@ -319,5 +322,6 @@ pub async fn ingest_csv_batch(
     Ok(Json(BatchResponse {
         count: results.len(),
         results,
+        processed_at: Utc::now(),
     }))
 }
