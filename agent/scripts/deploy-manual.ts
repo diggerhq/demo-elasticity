@@ -68,11 +68,36 @@ await run(
   "Set env vars"
 );
 
-// Step 7: Checkpoint
+// Step 7: Checkpoint — wait for it to be ready before killing sandbox
 console.log("\n=== Creating checkpoint ===");
 const checkpoint = await sandbox.createCheckpoint(SNAPSHOT_NAME);
-console.log(`✓ Checkpoint created: ${JSON.stringify(checkpoint)}`);
+console.log(`Checkpoint created: ${checkpoint.id} (status: ${checkpoint.status})`);
+
+// Poll until checkpoint is ready
+if (checkpoint.status !== "ready") {
+  console.log("Waiting for checkpoint to be ready...");
+  const checkpoints = await sandbox.listCheckpoints();
+  const check = checkpoints.find((c: any) => c.id === checkpoint.id);
+  console.log(`Current status: ${check?.status ?? "unknown"}`);
+
+  // Wait and poll
+  for (let i = 0; i < 60; i++) {
+    await new Promise(r => setTimeout(r, 5000));
+    const list = await sandbox.listCheckpoints();
+    const cp = list.find((c: any) => c.id === checkpoint.id);
+    const status = cp?.status ?? "unknown";
+    process.stdout.write(`  ${status}...`);
+    if (status === "ready") {
+      console.log(" ✓");
+      break;
+    }
+    if (status === "failed") {
+      console.log(" ✗");
+      throw new Error("Checkpoint failed");
+    }
+  }
+}
 
 // Cleanup
 await sandbox.kill();
-console.log(`\nDone. Snapshot '${SNAPSHOT_NAME}' is ready.`);
+console.log(`\nDone. Snapshot '${SNAPSHOT_NAME}' is ready (checkpoint: ${checkpoint.id}).`);
