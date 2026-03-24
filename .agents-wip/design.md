@@ -12,6 +12,14 @@
 
 **Memory cap**: OpenComputer currently enforces a 2048 MB ceiling on `Sandbox.create()`. This needs to be raised (or bypassed for this org) so the sandbox can scale to 8192 MB at runtime.
 
+**Sandbox runs as root**: OC sandboxes run as root. Claude Code CLI refuses `--allow-dangerously-skip-permissions` as root for security. Agent uses `permissionMode: "acceptEdits"` instead.
+
+**Rootfs is small (1.7 GB)**: The base sandbox rootfs is only 1.7 GB. The data disk (`/workspace`) is 20 GB. Rust toolchain (~1 GB) must install to `/workspace/.rustup` and `/workspace/.cargo`, not the default `/root/` paths.
+
+**Declarative snapshots timeout**: `Snapshots.create()` with a full `Image` definition times out through Cloudflare (524) because the build takes too long before the first response byte. The working path is manual: create a sandbox → run setup commands step by step → checkpoint.
+
+**Claude Code CLI required**: `@anthropic-ai/claude-agent-sdk` spawns the `claude` CLI as a subprocess. It must be installed globally (`npm install -g @anthropic-ai/claude-code`) in the snapshot.
+
 ---
 
 ## Architecture
@@ -181,11 +189,13 @@ GITHUB_TOKEN=                # gh CLI auth
 agent/
 ├── package.json
 ├── tsconfig.json
+├── .env.example
 ├── src/
 │   └── index.ts           # Entry point — parses args, runs query(), handles result
 ├── prompt.md              # System prompt — loaded by index.ts at runtime
 └── scripts/
-    └── deploy.ts          # Packages agent + env into an OC snapshot
+    ├── deploy.ts          # Declarative deploy (doesn't work — Cloudflare timeout)
+    └── deploy-manual.ts   # Working deploy: sandbox → steps → checkpoint
 ```
 
 ### Entry Point (`src/index.ts`)
@@ -193,7 +203,7 @@ agent/
 See `agent/src/index.ts` for actual code. Key points:
 - `import "dotenv/config"` at top — auto-loads `.env`
 - `mkdtempSync()` creates a fresh temp dir for `cwd` (avoids cloning into source tree)
-- `query()` with `permissionMode: "bypassPermissions"` — agent runs tools without asking
+- `query()` with `permissionMode: "acceptEdits"` — sandbox runs as root, `bypassPermissions` is rejected by Claude Code CLI
 - Event loop logs `[agent]` text and `[tool]` calls with inputs for visibility
 - Prints duration + cost on completion
 
@@ -205,81 +215,41 @@ See `agent/prompt.md` for actual content. Covers: workflow (clone → investigat
 
 The same code runs in both environments. Locally, the agent creates a temp dir via `mkdtempSync()` and works there. In the sandbox, `AGENT_WORKDIR=/workspace` overrides this. The elasticity `curl` commands will 404 locally (no metadata service) but the build will just work if your machine has enough RAM.
 
-**Note**: Running locally the agent gets full `bypassPermissions` access to your machine. It will try to install tools, create files, etc. For safer local testing, use a sandbox (test level 2).
+**Note**: Running locally the agent uses `acceptEdits` mode — it will execute bash commands and edit files without asking. For safer local testing, use a sandbox (test level 2).
 
-### Deployment (`scripts/deploy.ts`)
+### Deployment (`scripts/deploy-manual.ts`)
 
-The agent owns its own packaging. `deploy.ts` builds a snapshot that includes the full runtime environment (Rust, Node.js, gh) and the agent code. api/ references this snapshot by name — it never touches agent files.
+The agent owns its own packaging. `deploy-manual.ts` creates a sandbox, installs tooling step by step, uploads agent code, and checkpoints. The declarative `deploy.ts` (using `Snapshots.create()`) exists but doesn't work — Cloudflare times out before the build completes.
 
-```typescript
-import { Image } from "@opencomputer/sdk/dist/image.js";
-import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
+See `agent/scripts/deploy-manual.ts` for actual code. Steps:
+1. Create base sandbox (1h timeout)
+2. Install Rust to `/workspace/.rustup` + `/workspace/.cargo` (rootfs too small)
+3. Install gh CLI via apt
+4. Install Claude Code CLI globally (`npm install -g @anthropic-ai/claude-code`)
+5. Upload agent source files via `sandbox.files.write()`
+6. Run `npm install && npm run build` inside sandbox
+7. Set env vars in `.bashrc` (PATH, RUSTUP_HOME, CARGO_HOME, AGENT_WORKDIR)
+8. Create checkpoint, poll until status = "ready"
+9. Kill sandbox
 
-const apiKey = process.env.OPENCOMPUTER_API_KEY!;
-const apiUrl = process.env.OPENCOMPUTER_API_URL!;
-
-const SNAPSHOT_NAME = "rust-agent";
-
-const image = Image.base()
-  // Rust toolchain
-  .runCommands(
-    'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y',
-  )
-  // Node.js 22
-  .runCommands(
-    "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
-    "apt-get install -y nodejs",
-  )
-  // gh CLI
-  .aptInstall(["gh"])
-  // Agent source (explicit files — avoids shipping local node_modules)
-  .addLocalFile("package.json", "/workspace/agent/package.json")
-  .addLocalFile("package-lock.json", "/workspace/agent/package-lock.json")
-  .addLocalFile("tsconfig.json", "/workspace/agent/tsconfig.json")
-  .addLocalFile("prompt.md", "/workspace/agent/prompt.md")
-  .addLocalFile("src/index.ts", "/workspace/agent/src/index.ts")
-  .runCommands("cd /workspace/agent && npm ci && npm run build")
-  // Environment
-  .env({
-    PATH: "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    RUST_BACKTRACE: "1",
-    AGENT_WORKDIR: "/workspace",
-  })
-  .workdir("/workspace");
-
-const snapshots = new Snapshots({ apiKey, apiUrl });
-
-// Delete existing snapshot if present, then create fresh
-try { await snapshots.delete(SNAPSHOT_NAME); } catch { /* doesn't exist yet */ }
-
-await snapshots.create({
-  name: SNAPSHOT_NAME,
-  image,
-  onBuildLogs: (log) => console.log(log),
-});
-
-console.log(`Snapshot '${SNAPSHOT_NAME}' deployed.`);
-```
-
-Run from the agent directory:
 ```bash
 cd agent
-npm run deploy    # uses OPENCOMPUTER_API_KEY + OPENCOMPUTER_API_URL from .env or shell
+npx tsx scripts/deploy-manual.ts
 ```
 
-**Snapshot contents** (`rust-agent`):
+**Snapshot contents** (checkpoint `rust-agent`):
 
 | Layer | What |
 |-------|------|
-| OC base image | Ubuntu, build-essential, git, curl, libssl-dev, pkg-config, python3 |
-| Rust | `rustup` + stable toolchain |
-| Node.js 22 | Via nodesource |
-| gh CLI | Via apt |
+| OC base image | Ubuntu, build-essential, git, curl, libssl-dev, pkg-config, python3, Node.js 20 |
+| Rust | `/workspace/.rustup` + `/workspace/.cargo` (stable 1.94.0) |
+| gh CLI | Via apt (2.88.1) |
+| Claude Code CLI | `@anthropic-ai/claude-code` global npm package |
 | Agent | `/workspace/agent/` — source, node_modules, built dist |
 
-**Name resolution**: `Sandbox.create({ snapshot: "rust-agent" })` resolves by name. Deploy script deletes and recreates with the same name — api/ always gets the latest without config change.
+**Sandbox creation**: `Sandbox.createFromCheckpoint(checkpointId)` — uses the checkpoint ID, not a snapshot name. The checkpoint ID is stored in api/'s `.env` as `CHECKPOINT_ID`.
 
-**When to redeploy**: Any change to agent source, prompt, or deps. This is the agent's CI/CD step — equivalent to `docker build && docker push`.
+**When to redeploy**: Any change to agent source, prompt, or deps. Rerun `deploy-manual.ts` → get new checkpoint ID → update `CHECKPOINT_ID` in api/.env.
 
 ---
 
@@ -326,12 +296,14 @@ GET /health
 ```bash
 OPENCOMPUTER_API_KEY=       # OC API key for sandbox creation
 OPENCOMPUTER_API_URL=       # OC API endpoint
-GITHUB_TOKEN=               # PAT with repo scope — for posting comments from api/ itself
+GITHUB_TOKEN=               # PAT with repo scope — for posting comments + passed to sandbox
 GITHUB_WEBHOOK_SECRET=      # Shared secret for webhook HMAC verification
+ANTHROPIC_API_KEY=          # Passed to sandbox for Claude agent
+CHECKPOINT_ID=              # Checkpoint ID from deploy-manual.ts output
 PORT=3000                   # Server port (default 3000)
 ```
 
-`ANTHROPIC_API_KEY` and the sandbox's `GITHUB_TOKEN` are **not** here — they live in the OC SecretStore and are injected into the sandbox automatically. api/ only needs its own `GITHUB_TOKEN` for posting comments on behalf of the webhook handler.
+Secrets are passed to the sandbox via env vars in `exec.start()`. SecretStore is the intended long-term solution but isn't set up yet — env vars work for the demo.
 
 ### Entry Point (`index.ts`)
 
@@ -407,65 +379,13 @@ export async function postComment(repo: string, issue: number, body: string): Pr
 
 ### Sandbox Orchestration (`sandbox.ts`)
 
-Creates sandbox from the agent's snapshot, runs it, waits for exit. No file syncing, no knowledge of agent internals.
+See `api/src/sandbox.ts` for actual code. Key points:
+- Uses `Sandbox.createFromCheckpoint(CHECKPOINT_ID)` — not `Sandbox.create({ snapshot })`. Checkpoint ID from deploy output.
+- Passes Rust env vars (`RUSTUP_HOME`, `CARGO_HOME`, `PATH`) + secrets (`ANTHROPIC_API_KEY`, `GITHUB_TOKEN`) as `env` to `exec.start()`. The `.bashrc` approach doesn't work in non-interactive exec.
+- Streams stdout/stderr from the agent process.
+- Posts failure comment on non-zero exit, kills sandbox in `finally`.
 
-```typescript
-import { Sandbox } from "@opencomputer/sdk";
-import { postComment } from "./github";
-
-interface RunContext {
-  repo: string;
-  issueNumber: number;
-}
-
-export async function runAgent(ctx: RunContext): Promise<void> {
-  // 1. Create sandbox — code is in snapshot, secrets come from SecretStore
-  const sandbox = await Sandbox.create({
-    snapshot: "rust-agent",
-    secretStore: "rust-agent",
-    timeout: 1800,
-    memoryMB: 2048,
-    envs: {
-      CARGO_BUILD_JOBS: "1",  // non-secret config only
-    },
-  });
-
-  console.log(`Sandbox ${sandbox.sandboxId} created for #${ctx.issueNumber}`);
-
-  try {
-    // 2. Run agent
-    const session = await sandbox.exec.start(
-      "node",
-      {
-        args: [
-          "/workspace/agent/dist/index.js",
-          "--repo", ctx.repo,
-          "--issue", String(ctx.issueNumber),
-        ],
-        cwd: "/workspace",
-        timeout: 1500,
-        onStdout: (data) => process.stdout.write(data),
-        onStderr: (data) => process.stderr.write(data),
-      },
-    );
-
-    // 3. Wait for exit
-    const exitCode = await session.done;
-    console.log(`Agent exited: ${exitCode}`);
-
-    if (exitCode !== 0) {
-      await postComment(ctx.repo, ctx.issueNumber,
-        `❌ Agent exited with code ${exitCode}. Check logs for details.`
-      );
-    }
-  } finally {
-    await sandbox.kill();
-    console.log(`Sandbox ${sandbox.sandboxId} killed`);
-  }
-}
-```
-
-api/ knows four things about the agent: the snapshot name, the secret store name, the entry point path, and the CLI args. That's it. No secret values, no agent source files.
+api/ knows: the checkpoint ID, the entry point path, the CLI args, and the env vars to pass. That's it.
 
 ### Concurrency
 
@@ -482,39 +402,22 @@ For the demo, one agent at a time is fine. Each webhook spawns an independent sa
 
 ### Bootstrap (once)
 
-Infrastructure that exists before anything runs. Do these once, update when keys rotate or infra changes.
+Fill in `.env` files for both `agent/` and `api/` with the required credentials:
+- `OPENCOMPUTER_API_KEY` + `OPENCOMPUTER_API_URL` — OC access
+- `ANTHROPIC_API_KEY` — Claude API key
+- `GITHUB_TOKEN` — GitHub PAT with repo scope
 
-**OC SecretStore** — holds secrets for the agent sandbox:
-
-```typescript
-import { SecretStore } from "@opencomputer/sdk";
-
-const opts = { apiKey: "...", apiUrl: "..." };
-
-const store = await SecretStore.create({ name: "rust-agent", ...opts });
-
-await SecretStore.setSecret(store.id, "ANTHROPIC_API_KEY", "sk-ant-...", {
-  allowedHosts: ["api.anthropic.com"],
-  ...opts,
-});
-
-await SecretStore.setSecret(store.id, "GITHUB_TOKEN", "ghp_...", {
-  allowedHosts: ["github.com", "api.github.com"],
-  ...opts,
-});
-```
-
-Can be a small script (`scripts/setup-secrets.ts`) or done via OC dashboard if one exists. Secrets are injected as env vars into any sandbox created with `secretStore: "rust-agent"`. The `allowedHosts` field provides egress control.
+Long-term, secrets should move to an OC SecretStore for egress control. For now, env vars work.
 
 ### Deploy (on agent code change)
 
 ```bash
 cd agent
-npm install                  # only needed once locally
-npm run deploy               # rebuilds snapshot "rust-agent"
+npm install                        # only needed once locally
+npx tsx scripts/deploy-manual.ts   # creates sandbox, installs tools, checkpoints
 ```
 
-The deploy script uploads source files and runs `npm ci && npm run build` inside the snapshot — the build happens there, not locally. Agent code change → redeploy snapshot → next sandbox picks it up.
+Output includes the checkpoint ID. Update `CHECKPOINT_ID` in `api/.env` with the new value. Agent code change → redeploy → update checkpoint ID → next sandbox picks it up.
 
 ### Run
 
@@ -540,7 +443,7 @@ npm run dev -- --repo diggerhq/demo-elasticity --issue 1
 
 The agent will clone, investigate, fix, build, test, and PR — same as in a sandbox. Elasticity `curl` commands will 404 (no metadata service) but that's fine — your machine has enough RAM so the build won't OOM. This tests agent logic, prompt quality, and the full workflow without any OC dependency.
 
-**Caveat**: The agent runs with `bypassPermissions` so it has full access to your machine. It may try to install tools or access broad system paths. For safer testing, use level 2 (sandbox).
+**Caveat**: The agent runs with `acceptEdits` — it executes bash commands and edits files without prompting. For safer testing, use level 2 (sandbox).
 
 #### 2. Agent in sandbox (no webhook, no elasticity)
 
@@ -604,7 +507,7 @@ Time  What
 0:00  User comments "@myagent resolve this" on issue #42
 0:01  GitHub POSTs webhook to api/
 0:01  api/ verifies signature, posts "Working on it..." comment
-0:02  api/ → Sandbox.create({ snapshot: "rust-agent", secretStore: "rust-agent", memoryMB: 2048 })
+0:02  api/ → Sandbox.createFromCheckpoint(CHECKPOINT_ID)
 0:03  api/ → sandbox.exec.start("node /workspace/agent/dist/index.js --repo ... --issue 42")
 
       ── Agent process running inside sandbox ──
@@ -665,49 +568,56 @@ demo-elasticity/
 │   │   └── index.ts               # Entry: parse args, query(), handle result
 │   ├── prompt.md                  # System prompt (loaded by index.ts)
 │   └── scripts/
-│       └── deploy.ts              # Builds snapshot: Rust + Node + gh + agent code
+│       ├── deploy.ts              # Declarative deploy (doesn't work — Cloudflare timeout)
+│       └── deploy-manual.ts       # Working deploy: sandbox → steps → checkpoint
 │
 └── api/                           # Webhook handler + sandbox launcher
-    ├── package.json               # hono, @opencomputer/sdk
+    ├── package.json               # hono, @opencomputer/sdk, @octokit/*
     ├── tsconfig.json
     ├── .env.example
-    └── src/
-        ├── index.ts               # Hono app, server
-        ├── webhook.ts             # Webhook handler
-        ├── sandbox.ts             # Sandbox.create() + exec.start()
-        └── github.ts              # Signature verification, comment posting
+    ├── src/
+    │   ├── index.ts               # Hono app, server
+    │   ├── webhook.ts             # Webhook handler
+    │   ├── sandbox.ts             # createFromCheckpoint() + exec.start()
+    │   └── github.ts              # Octokit helpers
+    └── scripts/
+        ├── test-sandbox.ts        # Direct agent test (no webhook)
+        └── test-debug.ts          # Debug test with full output capture
 ```
 
 ---
 
 ## Implementation Notes
 
-**Code sketches vs actual code**: The sketches in Component 3 (api/) match the actual source. Component 2 (agent/) sketches have been replaced with pointers to the actual files — the source is the authority. Always check the actual files if something looks off.
+**Source is authority**: Code sketches in this doc may lag the actual source files. When in doubt, read `agent/src/index.ts`, `api/src/sandbox.ts`, and `agent/scripts/deploy-manual.ts` directly.
 
-Other things that aren't obvious:
-
-**OC SDK reference**: The OpenComputer TypeScript SDK source is at `../opencomputer/sdks/typescript/src/`. Read this for exact method signatures — the code sketches in this doc are accurate but not exhaustive. Key files: `sandbox.ts`, `exec.ts`, `filesystem.ts`, `image.ts` (Node.js-only import from `@opencomputer/sdk/dist/image.js`), `snapshot.ts` (Node.js-only import from `@opencomputer/sdk/dist/snapshot.js`).
-
-**Do NOT use `addLocalDir` in deploy.ts**: The deploy script uses explicit `addLocalFile()` calls for a reason. `addLocalDir(".")` recursively base64-encodes every file into the snapshot manifest — including `node_modules/` — which would be enormous and broken. The snapshot's `npm ci` installs deps cleanly from the uploaded `package.json` + `package-lock.json`.
+**OC SDK**: Installed from local source (`file:../../opencomputer/sdks/typescript`), not npm. The published version lags behind — missing `snapshot`, `exec`, `secretStore`. SDK source at `../opencomputer/sdks/typescript/src/`. We added `"./dist/*": "./dist/*"` to the SDK's package.json exports to enable subpath imports for `Image` and `Snapshots`.
 
 **ingest-rs is a subdirectory**: `ingest-rs/` lives inside this repo (`diggerhq/demo-elasticity`). The agent clones the whole repo and works in the `ingest-rs/` subdirectory. The system prompt tells it this.
 
-**Agent SDK `query()` returns an async generator**: The stream yields `SDKMessage` objects. The code sketch handles `"assistant"` and `"result"` types. For the full type union, check the SDK types at `../base360-checkin-agent/agent/node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts` or the SDK source.
+**Agent SDK `query()` returns an async generator**: The stream yields `SDKMessage` objects. The code handles `"assistant"` and `"result"` types. For the full type union, check `../base360-checkin-agent/agent/node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts`.
+
+**Sandbox env vars for Rust**: The `.bashrc` approach doesn't work for `exec.start()` commands (non-interactive shell). Rust env vars (`RUSTUP_HOME`, `CARGO_HOME`, `PATH`) must be passed explicitly in the `env` option of `exec.start()`.
 
 ---
 
 ## Open Questions
 
-- **Calibration**: Need to empirically verify the memory profile by building `ingest-rs` under constrained memory. Number of source event structs is the tuning lever.
-- **OOM detection reliability**: Exit 137 is clear. `rustc` LLVM errors may look different. System prompt covers both patterns but needs testing.
-- **Real repo vs. demo org**: Real public repo is more convincing but needs cleanup between demo runs. Dedicated demo org is safer.
-- **Snapshot lifecycle**: How long do OC snapshots persist? Does `snapshots.create()` with an existing name overwrite, or do we need delete+create? Current deploy script does delete+create to be safe. If OC adds tag/version support, we can use that instead.
+- **Calibration**: Need to empirically verify the memory profile by building `ingest-rs` under constrained memory (2 GB sandbox). Number of source event structs is the tuning lever. The current ~20 structs may not be enough — hasn't been tested under memory constraint yet.
+- **OOM detection reliability**: Exit 137 is clear. `rustc` LLVM errors may look different. System prompt covers both patterns but needs testing under actual OOM conditions.
+- **Declarative snapshots**: `Snapshots.create()` with `Image` definitions times out through Cloudflare. Either OC needs to stream build logs faster (keep Cloudflare alive) or we keep using the manual checkpoint approach.
+- **SecretStore migration**: Currently passing secrets as env vars. Should move to OC SecretStore for egress control, but works for demo.
 
 ## Resolved
 
-- **Agent is real code**: Standalone Node.js program using `query()` from `@anthropic-ai/claude-agent-sdk`. Not prompt-only via `sandbox.agent.start()`. Runs locally or in sandbox. See AGENTS.md for reasoning.
-- **No database in ingest-rs**: Pipeline writes JSON to stdout/response. No sqlx, no Postgres, no migrations. Monomorphization pressure comes from the generic pipeline across ~20 event types, not from DB code.
-- **Agent owns deployment**: `agent/scripts/deploy.ts` builds the snapshot. api/ just references `snapshot: "rust-agent"`. Clean separation — api/ has zero knowledge of agent internals.
+- **Agent is real code**: Standalone Node.js program using `query()` from `@anthropic-ai/claude-agent-sdk`. Not prompt-only via `sandbox.agent.start()`. See AGENTS.md for reasoning.
+- **No database in ingest-rs**: Pipeline writes JSON to stdout/response. Monomorphization pressure from generics, not storage.
+- **Agent owns deployment**: `deploy-manual.ts` builds the checkpoint. api/ references a checkpoint ID.
 - **Status reporting**: Agent posts its own GitHub comments via `gh` CLI. api/ only posts initial ack and failure fallback.
 - **Framework**: Hono + @octokit/rest + @octokit/webhooks for GitHub interaction.
-- **Elasticity API contract**: Per `elasticity.md`. Not yet implemented in OC — demo assumes it ships. See Prerequisites.
+- **Elasticity API contract**: Per `elasticity.md`. Not yet implemented in OC — demo assumes it ships.
+- **Permission mode**: `acceptEdits` not `bypassPermissions` — sandbox runs as root, Claude Code CLI rejects `--allow-dangerously-skip-permissions` as root.
+- **Rust install path**: `/workspace/.rustup` + `/workspace/.cargo` — rootfs is only 1.7 GB, data disk (`/workspace`) has 20 GB.
+- **Base image**: Already has Node.js 20, build-essential, git, curl. Need to add: Rust, gh CLI, Claude Code CLI.
+- **Checkpoint-based deploy**: Manual approach (create sandbox → run steps → checkpoint) works around Cloudflare timeout on declarative snapshots.
+- **E2E verified**: Agent completed successfully in sandbox — ~3 min, $0.46 cost. Created PR #2 on diggerhq/demo-elasticity.
