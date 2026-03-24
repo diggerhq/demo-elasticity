@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
