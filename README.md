@@ -1,5 +1,7 @@
 # demo-elasticity
 
+[**Watch the demo**](https://www.loom.com/share/6e19170da8a34e33888d1a9d8d218514)
+
 An AI agent that resolves GitHub issues in an [OpenComputer](https://opencomputer.dev) sandbox with **live resource scaling**. The sandbox starts small, scales up for heavy compilation, and scales back down — paying for peak resources only when needed.
 
 ## What it does
