@@ -2,6 +2,7 @@ mod handlers;
 mod pipeline;
 mod sources;
 mod unified;
+mod storage;
 
 use axum::{routing::post, Router};
 use clap::Parser;
@@ -26,11 +27,17 @@ async fn main() {
         .route("/ingest/stripe", post(handlers::ingest_stripe))
         .route("/ingest/custom", post(handlers::ingest_custom))
         .route("/ingest/csv", post(handlers::ingest_csv))
+        .route("/ingest/cloud", post(handlers::ingest_cloud))
+        .route("/ingest/observability", post(handlers::ingest_observability))
+        .route("/ingest/commerce", post(handlers::ingest_commerce))
         // Batch endpoints
         .route("/ingest/github/batch", post(handlers::ingest_github_batch))
         .route("/ingest/stripe/batch", post(handlers::ingest_stripe_batch))
         .route("/ingest/custom/batch", post(handlers::ingest_custom_batch))
-        .route("/ingest/csv/batch", post(handlers::ingest_csv_batch));
+        .route("/ingest/csv/batch", post(handlers::ingest_csv_batch))
+        .route("/ingest/cloud/batch", post(handlers::ingest_cloud_batch))
+        .route("/ingest/observability/batch", post(handlers::ingest_observability_batch))
+        .route("/ingest/commerce/batch", post(handlers::ingest_commerce_batch));
 
     let addr = format!("0.0.0.0:{}", args.port);
     tracing::info!("Starting ingest-rs on {}", addr);

@@ -2,6 +2,9 @@ use crate::sources::github::*;
 use crate::sources::stripe::*;
 use crate::sources::custom::*;
 use crate::sources::csv::*;
+use crate::sources::cloud::*;
+use crate::sources::observability::*;
+use crate::sources::commerce::*;
 
 /// Trait for parsing raw JSON strings into typed event structs.
 pub trait Parseable: Sized {
@@ -133,5 +136,143 @@ impl Parseable for CsvInventoryRow {
 impl Parseable for CsvUserActivityRow {
     fn parse(raw: &str) -> Result<Self, String> {
         serde_json::from_str(raw).map_err(|e| format!("CsvUserActivityRow parse: {}", e))
+    }
+}
+
+// --- Cloud event types ---
+
+impl Parseable for Ec2InstanceEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("Ec2InstanceEvent parse: {}", e))
+    }
+}
+
+impl Parseable for S3BucketEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("S3BucketEvent parse: {}", e))
+    }
+}
+
+impl Parseable for LambdaInvocationEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("LambdaInvocationEvent parse: {}", e))
+    }
+}
+
+impl Parseable for CloudWatchAlarmEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("CloudWatchAlarmEvent parse: {}", e))
+    }
+}
+
+impl Parseable for RdsEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("RdsEvent parse: {}", e))
+    }
+}
+
+impl Parseable for EcsTaskEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("EcsTaskEvent parse: {}", e))
+    }
+}
+
+impl Parseable for SqsMessageEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("SqsMessageEvent parse: {}", e))
+    }
+}
+
+impl Parseable for SnsNotificationEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("SnsNotificationEvent parse: {}", e))
+    }
+}
+
+// --- Observability event types ---
+
+impl Parseable for LogEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("LogEvent parse: {}", e))
+    }
+}
+
+impl Parseable for TraceSpanEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("TraceSpanEvent parse: {}", e))
+    }
+}
+
+impl Parseable for MetricDatapointEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("MetricDatapointEvent parse: {}", e))
+    }
+}
+
+impl Parseable for IncidentEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("IncidentEvent parse: {}", e))
+    }
+}
+
+impl Parseable for PagerDutyAlertEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("PagerDutyAlertEvent parse: {}", e))
+    }
+}
+
+impl Parseable for GrafanaAlertEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("GrafanaAlertEvent parse: {}", e))
+    }
+}
+
+impl Parseable for DatadogEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("DatadogEvent parse: {}", e))
+    }
+}
+
+impl Parseable for SentryErrorEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("SentryErrorEvent parse: {}", e))
+    }
+}
+
+// --- Commerce event types ---
+
+impl Parseable for OrderEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("OrderEvent parse: {}", e))
+    }
+}
+
+impl Parseable for ShipmentEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("ShipmentEvent parse: {}", e))
+    }
+}
+
+impl Parseable for InventoryChangeEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("InventoryChangeEvent parse: {}", e))
+    }
+}
+
+impl Parseable for ReturnEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("ReturnEvent parse: {}", e))
+    }
+}
+
+impl Parseable for ReviewEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("ReviewEvent parse: {}", e))
+    }
+}
+
+impl Parseable for CouponEvent {
+    fn parse(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|e| format!("CouponEvent parse: {}", e))
     }
 }
