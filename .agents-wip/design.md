@@ -129,30 +129,31 @@ Tuning lever: number of source event structs. More structs = more monomorphizati
 
 A standalone Node.js application using `@anthropic-ai/claude-agent-sdk`. Resolves a GitHub issue by cloning the repo, investigating, fixing, building, testing, and opening a PR.
 
-Can run locally:
+Can run locally (`.env` auto-loaded by dotenv):
 ```bash
 cd agent
-ANTHROPIC_API_KEY=... GITHUB_TOKEN=... npx tsx src/index.ts --repo owner/repo --issue 42
+npm run dev -- --repo diggerhq/demo-elasticity --issue 1
 ```
 
-Or inside an OpenComputer sandbox (deployed as a snapshot via `scripts/deploy.ts`).
+Or inside an OpenComputer sandbox (deployed as a snapshot via `npm run deploy`).
 
 ### Dependencies
 
 ```json
 {
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.71"
+    "@anthropic-ai/claude-agent-sdk": "^0.2.71",
+    "dotenv": "^17"
   },
   "devDependencies": {
-    "@opencomputer/sdk": "^0.4",
+    "@opencomputer/sdk": "file:../../opencomputer/sdks/typescript",
     "tsx": "^4",
     "typescript": "^5"
   }
 }
 ```
 
-One runtime dependency (the agent SDK). `@opencomputer/sdk` is a devDep — only used by the deploy script, not shipped into the snapshot.
+Two runtime deps: agent SDK + dotenv. `@opencomputer/sdk` is a devDep installed from local source (published npm version lags behind — missing `snapshot`, `exec`, `secretStore`).
 
 ### Environment Variables
 
@@ -168,11 +169,10 @@ OPENCOMPUTER_API_KEY=        # OC API key for snapshot creation
 OPENCOMPUTER_API_URL=        # OC API endpoint
 ```
 
-**Local testing** (`.env` or shell):
+**Local testing** (`.env`, auto-loaded by dotenv):
 ```bash
 ANTHROPIC_API_KEY=           # Claude API
 GITHUB_TOKEN=                # gh CLI auth
-AGENT_WORKDIR=/tmp/workspace # optional, defaults to cwd
 ```
 
 ### Structure
@@ -190,122 +190,22 @@ agent/
 
 ### Entry Point (`src/index.ts`)
 
-```typescript
-import { query } from "@anthropic-ai/claude-agent-sdk";
-import { readFileSync } from "node:fs";
-import { parseArgs } from "node:util";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-const { values } = parseArgs({
-  options: {
-    repo:  { type: "string" },
-    issue: { type: "string" },
-  },
-  strict: true,
-});
-
-if (!values.repo || !values.issue) {
-  console.error("Usage: index.ts --repo owner/repo --issue 42");
-  process.exit(1);
-}
-
-const systemPrompt = readFileSync(join(__dirname, "../prompt.md"), "utf-8");
-
-const stream = query({
-  prompt: [
-    `Resolve this GitHub issue.`,
-    ``,
-    `Repository: ${values.repo}`,
-    `Issue number: ${values.issue}`,
-    ``,
-    `Start by running: gh issue view ${values.issue} --repo ${values.repo}`,
-  ].join("\n"),
-  options: {
-    model: "claude-sonnet-4-6",
-    systemPrompt,
-    tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
-    allowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
-    permissionMode: "bypassPermissions",
-    allowDangerouslySkipPermissions: true,
-    cwd: process.env.AGENT_WORKDIR ?? process.cwd(),
-    maxTurns: 50,
-  },
-});
-
-let exitCode = 0;
-
-for await (const message of stream) {
-  if (message.type === "assistant" && message.message?.content) {
-    for (const block of message.message.content) {
-      if (block.type === "text") {
-        console.log("[agent]", block.text?.slice(0, 200));
-      }
-    }
-  }
-
-  if (message.type === "result") {
-    if (message.subtype === "success") {
-      console.log("Agent completed successfully.");
-    } else {
-      console.error("Agent failed:", message.result ?? "unknown error");
-      exitCode = 1;
-    }
-  }
-}
-
-process.exit(exitCode);
-```
+See `agent/src/index.ts` for actual code. Key points:
+- `import "dotenv/config"` at top — auto-loads `.env`
+- `mkdtempSync()` creates a fresh temp dir for `cwd` (avoids cloning into source tree)
+- `query()` with `permissionMode: "bypassPermissions"` — agent runs tools without asking
+- Event loop logs `[agent]` text and `[tool]` calls with inputs for visibility
+- Prints duration + cost on completion
 
 ### System Prompt (`prompt.md`)
 
-```markdown
-You resolve GitHub issues for the `ingest-rs` project — a Rust data ingestion service.
-
-## Workflow
-
-1. Read the issue with `gh issue view` to understand what needs to change
-2. Clone the repo: `gh repo clone <owner>/<repo>`
-3. Investigate the codebase — find the relevant files, understand the structure
-4. Make the fix
-5. Build: `CARGO_BUILD_JOBS=1 cargo build 2>&1`
-6. If the build succeeds, run tests: `cargo test 2>&1`
-7. Commit, push a branch, and open a PR: `gh pr create --title "..." --body "..."`
-8. Post a status comment on the original issue: `gh issue comment <number> --body "..."`
-
-## Resource Scaling
-
-The sandbox starts with limited memory. If a build or test fails due to insufficient
-memory, you can scale up.
-
-**Detection**: Look for exit code 137, "Killed" in output, or LLVM allocation errors like:
-- `LLVM ERROR: out of memory`
-- `error: could not compile` with signal 9
-- `fatal runtime error: out of memory`
-
-**Scaling** (via instance metadata service):
-- Check current limits: `curl -s http://169.254.169.254/v1/limits`
-- Scale up: `curl -s -X POST http://169.254.169.254/v1/scale -H "Content-Type: application/json" -d '{"memoryMB": 8192}'`
-- After the memory-intensive step completes, scale back down: `curl -s -X POST http://169.254.169.254/v1/scale -H "Content-Type: application/json" -d '{"memoryMB": 2048}'`
-
-Scale down after compilation succeeds but before running tests — tests don't trigger
-recompilation so they need much less memory.
-
-## Rules
-
-- Always use `CARGO_BUILD_JOBS=1` to keep memory usage predictable
-- Don't install additional Rust toolchains or components — the sandbox has what you need
-- Commit on a new branch named `fix/<issue-number>-<short-description>`
-- PR body should reference the issue: `Fixes #<number>`
-```
+See `agent/prompt.md` for actual content. Covers: workflow (clone → investigate → fix → build → test → PR), elasticity scaling instructions (OOM detection patterns, metadata service curl commands), and rules (CARGO_BUILD_JOBS=1, branch naming). Tells the agent that `ingest-rs/` is a subdirectory of the repo.
 
 ### Running Locally vs. In Sandbox
 
-The same code runs in both environments. `cwd` defaults to `process.cwd()` locally, or can be set via `AGENT_WORKDIR` env var (the snapshot sets this to `/workspace`). The elasticity `curl` commands will 404 locally (no metadata service) but the build will just work if your machine has enough RAM.
+The same code runs in both environments. Locally, the agent creates a temp dir via `mkdtempSync()` and works there. In the sandbox, `AGENT_WORKDIR=/workspace` overrides this. The elasticity `curl` commands will 404 locally (no metadata service) but the build will just work if your machine has enough RAM.
 
-No conditional logic. The agent doesn't know or care where it's running.
+**Note**: Running locally the agent gets full `bypassPermissions` access to your machine. It will try to install tools, create files, etc. For safer local testing, use a sandbox (test level 2).
 
 ### Deployment (`scripts/deploy.ts`)
 
@@ -364,7 +264,7 @@ console.log(`Snapshot '${SNAPSHOT_NAME}' deployed.`);
 Run from the agent directory:
 ```bash
 cd agent
-OPENCOMPUTER_API_KEY=... OPENCOMPUTER_API_URL=... npx tsx scripts/deploy.ts
+npm run deploy    # uses OPENCOMPUTER_API_KEY + OPENCOMPUTER_API_URL from .env or shell
 ```
 
 **Snapshot contents** (`rust-agent`):
@@ -610,8 +510,8 @@ Can be a small script (`scripts/setup-secrets.ts`) or done via OC dashboard if o
 
 ```bash
 cd agent
-npm install                  # only needed once locally (for tsx + @opencomputer/sdk)
-npx tsx scripts/deploy.ts    # rebuilds snapshot "rust-agent"
+npm install                  # only needed once locally
+npm run deploy               # rebuilds snapshot "rust-agent"
 ```
 
 The deploy script uploads source files and runs `npm ci && npm run build` inside the snapshot — the build happens there, not locally. Agent code change → redeploy snapshot → next sandbox picks it up.
@@ -631,14 +531,16 @@ Three levels, from inner to outer. You can test each independently.
 
 #### 1. Agent locally (no sandbox, no OC)
 
-Run the agent on your machine against a real GitHub repo + issue:
+Run the agent on your machine against the demo repo + issue:
 
 ```bash
 cd agent
-ANTHROPIC_API_KEY=... GITHUB_TOKEN=... npx tsx src/index.ts --repo demo-org/ingest-rs --issue 1
+npm run dev -- --repo diggerhq/demo-elasticity --issue 1
 ```
 
 The agent will clone, investigate, fix, build, test, and PR — same as in a sandbox. Elasticity `curl` commands will 404 (no metadata service) but that's fine — your machine has enough RAM so the build won't OOM. This tests agent logic, prompt quality, and the full workflow without any OC dependency.
+
+**Caveat**: The agent runs with `bypassPermissions` so it has full access to your machine. It may try to install tools or access broad system paths. For safer testing, use level 2 (sandbox).
 
 #### 2. Agent in sandbox (no webhook, no elasticity)
 
@@ -648,7 +550,7 @@ Test the sandbox deployment path without waiting for the elasticity API. Use a s
 import { runAgent } from "../src/sandbox";
 
 await runAgent({
-  repo: "demo-org/ingest-rs",
+  repo: "diggerhq/demo-elasticity",
   issueNumber: 1,
 });
 ```
@@ -709,7 +611,7 @@ Time  What
       ── (query() loop: Claude API ↔ tool calls) ──
 
 0:10  Agent: gh issue view 42 → reads issue body
-0:15  Agent: gh repo clone demo-org/ingest-rs
+0:15  Agent: gh repo clone diggerhq/demo-elasticity
 0:30  Agent: investigates codebase, makes the fix
 1:30  Agent: CARGO_BUILD_JOBS=1 cargo build 2>&1
 3:00  Build killed (exit 137) — OOM at 2 GB
@@ -780,13 +682,15 @@ demo-elasticity/
 
 ## Implementation Notes
 
-Things that aren't obvious from the code sketches alone:
+**Code sketches vs actual code**: The sketches in Component 3 (api/) match the actual source. Component 2 (agent/) sketches have been replaced with pointers to the actual files — the source is the authority. Always check the actual files if something looks off.
+
+Other things that aren't obvious:
 
 **OC SDK reference**: The OpenComputer TypeScript SDK source is at `../opencomputer/sdks/typescript/src/`. Read this for exact method signatures — the code sketches in this doc are accurate but not exhaustive. Key files: `sandbox.ts`, `exec.ts`, `filesystem.ts`, `image.ts` (Node.js-only import from `@opencomputer/sdk/dist/image.js`), `snapshot.ts` (Node.js-only import from `@opencomputer/sdk/dist/snapshot.js`).
 
 **Do NOT use `addLocalDir` in deploy.ts**: The deploy script uses explicit `addLocalFile()` calls for a reason. `addLocalDir(".")` recursively base64-encodes every file into the snapshot manifest — including `node_modules/` — which would be enormous and broken. The snapshot's `npm ci` installs deps cleanly from the uploaded `package.json` + `package-lock.json`.
 
-**ingest-rs lives here, deployed separately**: `ingest-rs/` source is developed in this repo. For the demo, it gets pushed to a separate GitHub repo (e.g. `demo-org/ingest-rs`) where the demo issue lives. The agent inside the sandbox clones it from GitHub via `gh repo clone`. Changes to `ingest-rs/` here need to be pushed to the demo repo separately.
+**ingest-rs is a subdirectory**: `ingest-rs/` lives inside this repo (`diggerhq/demo-elasticity`). The agent clones the whole repo and works in the `ingest-rs/` subdirectory. The system prompt tells it this.
 
 **Agent SDK `query()` returns an async generator**: The stream yields `SDKMessage` objects. The code sketch handles `"assistant"` and `"result"` types. For the full type union, check the SDK types at `../base360-checkin-agent/agent/node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts` or the SDK source.
 
