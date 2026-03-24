@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { Image } from "@opencomputer/sdk/dist/image.js";
 import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
 

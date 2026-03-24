@@ -12,6 +12,7 @@
     "@octokit/rest": "^21",
     "@octokit/webhooks": "^13",
     "@opencomputer/sdk": "file:../../opencomputer/sdks/typescript",
+    "dotenv": "^17.3.1",
     "hono": "^4"
   },
   "devDependencies": {
