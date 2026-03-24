@@ -8,7 +8,7 @@ An agent resolves GitHub issues in an OpenComputer sandbox. The target project i
 
 ### 1. `ingest-rs/` — Data Ingestion Service (Rust)
 
-An HTTP service that receives events from webhooks, CSV uploads, and streaming sources, normalizes them through a typed transform pipeline, and writes to a database. Standard Rust stack: axum, serde, sqlx, tokio.
+An HTTP service that receives events from webhooks, CSV uploads, and streaming sources, normalizes them through a typed generic transform pipeline, and emits JSON. Standard Rust stack: axum, serde, tokio. No database — the pipeline validates, normalizes, and serializes. The monomorphization pressure comes from ~20 event types × 6 generic pipeline stages, not from storage code.
 
 The compilation is memory-intensive because the generic transform pipeline is monomorphized across many concrete event types — each source has its own struct, and each goes through the same generic layers, which forces `rustc`/LLVM to generate and optimize a large amount of IR. This is normal for Rust projects with broad type surface; nothing is artificially inflated.
 
