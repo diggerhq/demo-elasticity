@@ -49,7 +49,7 @@ import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
 **Key design choices**:
 - **Agent is real code**: A standalone Node.js program using `@anthropic-ai/claude-agent-sdk`'s `query()` API. Runs locally or in a sandbox. The sandbox is compute, not an agent framework. See AGENTS.md for full reasoning.
 - **api/ uses `sandbox.exec`**: Not `sandbox.agent.start()`. The agent is deployed as code, not as a prompt config.
-- **Deps in snapshot, source synced at runtime**: Agent npm dependencies (slow to install) are pre-installed in the snapshot. Agent source code (2 small files) is synced at launch time via `sandbox.files.write()`. This means agent code changes don't require a snapshot rebuild.
+- **Agent owns its own deployment**: `agent/` has a deploy script that packages everything (code + deps) into a named snapshot. api/ just references the snapshot — zero knowledge of agent internals.
 
 ---
 
@@ -167,7 +167,9 @@ agent/
 ├── tsconfig.json
 ├── src/
 │   └── index.ts           # Entry point — parses args, runs query(), handles result
-└── prompt.md              # System prompt — loaded by index.ts at runtime
+├── prompt.md              # System prompt — loaded by index.ts at runtime
+└── scripts/
+    └── deploy.ts          # Packages agent + env into an OC snapshot
 ```
 
 ### Entry Point (`src/index.ts`)
@@ -291,16 +293,76 @@ The same code runs in both environments. The only differences are:
 
 No code changes, no conditional logic. The agent doesn't know or care where it's running.
 
+### Deployment (`scripts/deploy.ts`)
+
+The agent owns its own packaging. `deploy.ts` builds a snapshot that includes the full runtime environment (Rust, Node.js, gh) and the agent code. api/ references this snapshot by name — it never touches agent files.
+
+```typescript
+import { readFileSync } from "node:fs";
+import { Image } from "@opencomputer/sdk/dist/image.js";
+import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
+
+const apiKey = process.env.OPENCOMPUTER_API_KEY!;
+const apiUrl = process.env.OPENCOMPUTER_API_URL!;
+
+const SNAPSHOT_NAME = "rust-agent";
+
+const image = Image.base()
+  // Rust toolchain
+  .runCommands(
+    'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y',
+  )
+  // Node.js 22
+  .runCommands(
+    "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
+    "apt-get install -y nodejs",
+  )
+  // gh CLI
+  .aptInstall(["gh"])
+  // Agent code + deps
+  .addLocalDir(".", "/workspace/agent")
+  .runCommands("cd /workspace/agent && npm install && npm run build")
+  // Environment
+  .env({
+    PATH: "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    RUST_BACKTRACE: "1",
+  })
+  .workdir("/workspace");
+
+const snapshots = new Snapshots({ apiKey, apiUrl });
+
+// Delete existing snapshot if present, then create fresh
+try { await snapshots.delete(SNAPSHOT_NAME); } catch { /* doesn't exist yet */ }
+
+await snapshots.create({
+  name: SNAPSHOT_NAME,
+  image,
+  onBuildLogs: (log) => console.log(log),
+});
+
+console.log(`Snapshot '${SNAPSHOT_NAME}' deployed.`);
+```
+
+Run from the agent directory:
+```bash
+cd agent
+OPENCOMPUTER_API_KEY=... OPENCOMPUTER_API_URL=... npx tsx scripts/deploy.ts
+```
+
+Recreating with the same name means api/ always gets the latest agent code without any config change. The `Sandbox.create({ snapshot: "rust-agent" })` call resolves by name.
+
+**When to redeploy**: Any change to agent source, prompt, or deps. This is the agent's CI/CD step — equivalent to `docker build && docker push`.
+
 ---
 
 ## Component 3: Event Handler / API (`api/`)
 
-Thin webhook handler + sandbox launcher. Receives a GitHub webhook, creates a sandbox, syncs agent source into it, runs the agent as a process, monitors exit.
+Thin webhook handler + sandbox launcher. Receives a GitHub webhook, creates a sandbox from the agent's pre-built snapshot, runs the agent, monitors exit. Has zero knowledge of agent internals.
 
 ### Dependencies
 
 - `hono` — HTTP framework
-- `@opencomputer/sdk` — sandbox creation + exec + filesystem
+- `@opencomputer/sdk` — sandbox creation + exec
 - `@hono/node-server` — run Hono on Node.js
 - Node.js `crypto` — HMAC-SHA256 webhook signature verification
 - `fetch` (built-in) — GitHub API calls for posting comments
@@ -314,13 +376,11 @@ api/
 ├── package.json
 ├── tsconfig.json
 ├── .env.example
-├── src/
-│   ├── index.ts            # Hono app, bind routes, start server
-│   ├── webhook.ts          # POST /webhooks/github — verify, parse, dispatch
-│   ├── sandbox.ts          # createSandbox(), syncAgent(), runAgent()
-│   └── github.ts           # postComment(), verifySignature()
-└── scripts/
-    └── create-snapshot.ts  # One-time: build snapshot with Rust + Node.js + agent deps
+└── src/
+    ├── index.ts            # Hono app, bind routes, start server
+    ├── webhook.ts          # POST /webhooks/github — verify, parse, dispatch
+    ├── sandbox.ts          # Sandbox.create() + exec.start()
+    └── github.ts           # postComment(), verifySignature()
 ```
 
 ### API Surface
@@ -411,16 +471,11 @@ export async function postComment(repo: string, issue: number, body: string): Pr
 
 ### Sandbox Orchestration (`sandbox.ts`)
 
-Creates sandbox, syncs agent source, runs it as a process.
+Creates sandbox from the agent's snapshot, runs it, waits for exit. No file syncing, no knowledge of agent internals.
 
 ```typescript
 import { Sandbox } from "@opencomputer/sdk";
-import { readFileSync } from "node:fs";
 import { postComment } from "./github";
-
-// Load agent source files at startup (small — index.ts + prompt.md)
-const agentSource = readFileSync("../agent/src/index.ts", "utf-8");
-const agentPrompt = readFileSync("../agent/prompt.md", "utf-8");
 
 interface RunContext {
   repo: string;
@@ -428,7 +483,7 @@ interface RunContext {
 }
 
 export async function runAgent(ctx: RunContext): Promise<void> {
-  // 1. Create sandbox — deps are pre-installed in snapshot, source is not
+  // 1. Create sandbox — everything is in the snapshot
   const sandbox = await Sandbox.create({
     snapshot: "rust-agent",
     timeout: 1800,
@@ -443,29 +498,23 @@ export async function runAgent(ctx: RunContext): Promise<void> {
   console.log(`Sandbox ${sandbox.sandboxId} created for #${ctx.issueNumber}`);
 
   try {
-    // 2. Sync agent source into sandbox (2 small files, instant)
-    //    node_modules/ is already in the snapshot from npm install at build time
-    await sandbox.files.makeDir("/workspace/agent/src");
-    await sandbox.files.write("/workspace/agent/src/index.ts", agentSource);
-    await sandbox.files.write("/workspace/agent/prompt.md", agentPrompt);
-
-    // 3. Run agent — same command you'd use locally
+    // 2. Run agent
     const session = await sandbox.exec.start(
-      "npx",
+      "node",
       {
         args: [
-          "tsx", "src/index.ts",
+          "/workspace/agent/dist/index.js",
           "--repo", ctx.repo,
           "--issue", String(ctx.issueNumber),
         ],
-        cwd: "/workspace/agent",
+        cwd: "/workspace",
         timeout: 1500,
         onStdout: (data) => process.stdout.write(data),
         onStderr: (data) => process.stderr.write(data),
       },
     );
 
-    // 4. Wait for exit
+    // 3. Wait for exit
     const exitCode = await session.done;
     console.log(`Agent exited: ${exitCode}`);
 
@@ -481,11 +530,7 @@ export async function runAgent(ctx: RunContext): Promise<void> {
 }
 ```
 
-**Key points**:
-- `sandbox.files.write()` syncs 2 small text files — instant
-- `npx tsx src/index.ts` uses tsx from the pre-installed node_modules
-- Agent source changes don't require snapshot rebuild — just restart api/
-- Snapshot rebuild only needed when agent deps change (rare)
+api/ knows three things about the agent: the snapshot name, the entry point path, and the CLI args. That's it.
 
 ### Concurrency
 
@@ -500,78 +545,31 @@ For the demo, one agent at a time is fine. Each webhook spawns an independent sa
 
 ## Snapshot: `rust-agent`
 
-The snapshot has the runtime environment + agent dependencies. Agent source code is synced at launch time.
+Owned and built by `agent/scripts/deploy.ts` (see Component 2 → Deployment). Contains the full runtime: system tooling, agent code, and agent dependencies. api/ references it by name.
 
-### What's In It
+| Layer | What |
+|-------|------|
+| OC base image | Ubuntu, build-essential, git, curl, libssl-dev, pkg-config, python3 |
+| Rust | `rustup` + stable toolchain |
+| Node.js 22 | Via nodesource |
+| gh CLI | Via apt |
+| Agent | `/workspace/agent/` — full source, node_modules, built dist |
 
-| Layer | What | Why |
-|-------|------|-----|
-| OC base image | Ubuntu, build-essential, git, curl, libssl-dev, pkg-config, python3 | Already there |
-| Rust | `rustup` + stable toolchain | Compile ingest-rs |
-| Node.js 22 | Via nodesource | Run the agent |
-| gh CLI | Via apt | GitHub interaction from agent |
-| Agent deps | `/workspace/agent/node_modules/` | Pre-installed, avoids npm install at launch |
+### Snapshot Name Resolution
 
-**Not in snapshot**: agent source code (`src/index.ts`, `prompt.md`). These are synced at runtime so code changes don't require a snapshot rebuild.
+`Sandbox.create({ snapshot: "rust-agent" })` resolves by name. The deploy script deletes and recreates with the same name on each deploy. api/ always gets the latest version without any config change.
 
-### Build Script (`scripts/create-snapshot.ts`)
+If OC supports snapshot tags or versioned names in future, we can use those instead of delete+create. For now, name-based resolution is sufficient.
 
-```typescript
-import { readFileSync } from "node:fs";
-import { Image } from "@opencomputer/sdk/dist/image.js";
-import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
+### When to Redeploy
 
-const apiKey = process.env.OPENCOMPUTER_API_KEY!;
-const apiUrl = process.env.OPENCOMPUTER_API_URL!;
-
-// Only embed package.json — source code is synced at runtime
-const agentPackageJson = readFileSync("../agent/package.json", "utf-8");
-
-const image = Image.base()
-  // Rust toolchain
-  .runCommands(
-    'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y',
-  )
-  // Node.js 22 (for the agent)
-  .runCommands(
-    "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
-    "apt-get install -y nodejs",
-  )
-  // gh CLI
-  .aptInstall(["gh"])
-  // Agent dependencies only (source synced at runtime)
-  .addFile("/workspace/agent/package.json", agentPackageJson)
-  .runCommands("cd /workspace/agent && npm install")
-  // Environment
-  .env({
-    PATH: "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    RUST_BACKTRACE: "1",
-  })
-  .workdir("/workspace");
-
-const snapshots = new Snapshots({ apiKey, apiUrl });
-await snapshots.create({
-  name: "rust-agent",
-  image,
-  onBuildLogs: (log) => console.log(log),
-});
-
-console.log("Snapshot 'rust-agent' created.");
-```
-
-### When to Rebuild
-
-- Agent deps change in `package.json` (rare)
-- Rust toolchain or Node.js version update
-- New system packages needed
-
-Agent source code changes (prompt, logic) do **not** require rebuild — they're synced at launch.
+Any change to agent source, prompt, or deps. Run `cd agent && npx tsx scripts/deploy.ts`. This is the agent's equivalent of `docker build && docker push`.
 
 ---
 
 ## Setup & Bootstrap
 
-### 1. Build the Agent (local verification)
+### 1. Build & Test Agent Locally
 
 ```bash
 cd agent
@@ -579,11 +577,11 @@ npm install
 ANTHROPIC_API_KEY=... GITHUB_TOKEN=... npx tsx src/index.ts --repo owner/repo --issue 42
 ```
 
-### 2. Create the Snapshot
+### 2. Deploy Agent Snapshot
 
 ```bash
-cd api
-OPENCOMPUTER_API_KEY=... OPENCOMPUTER_API_URL=... npx tsx scripts/create-snapshot.ts
+cd agent
+OPENCOMPUTER_API_KEY=... OPENCOMPUTER_API_URL=... npx tsx scripts/deploy.ts
 ```
 
 ### 3. Push ingest-rs
@@ -620,8 +618,7 @@ Time  What
 0:01  GitHub POSTs webhook to api/
 0:01  api/ verifies signature, posts "Working on it..." comment
 0:02  api/ → Sandbox.create({ snapshot: "rust-agent", memoryMB: 2048 })
-0:03  api/ → sandbox.files.write() — syncs index.ts + prompt.md
-0:03  api/ → sandbox.exec.start("npx tsx src/index.ts --repo ... --issue 42")
+0:03  api/ → sandbox.exec.start("node /workspace/agent/dist/index.js --repo ... --issue 42")
 
       ── Agent process running inside sandbox ──
       ── (query() loop: Claude API ↔ tool calls) ──
@@ -679,19 +676,19 @@ demo-elasticity/
 │   ├── tsconfig.json
 │   ├── src/
 │   │   └── index.ts               # Entry: parse args, query(), handle result
-│   └── prompt.md                  # System prompt (loaded by index.ts)
+│   ├── prompt.md                  # System prompt (loaded by index.ts)
+│   └── scripts/
+│       └── deploy.ts              # Builds snapshot: Rust + Node + gh + agent code
 │
 └── api/                           # Webhook handler + sandbox launcher
     ├── package.json               # hono, @opencomputer/sdk
     ├── tsconfig.json
     ├── .env.example
-    ├── src/
-    │   ├── index.ts               # Hono app, server
-    │   ├── webhook.ts             # Webhook handler
-    │   ├── sandbox.ts             # Sandbox.create() + files.write() + exec.start()
-    │   └── github.ts              # Signature verification, comment posting
-    └── scripts/
-        └── create-snapshot.ts     # One-time: build snapshot (deps only, no source)
+    └── src/
+        ├── index.ts               # Hono app, server
+        ├── webhook.ts             # Webhook handler
+        ├── sandbox.ts             # Sandbox.create() + exec.start()
+        └── github.ts              # Signature verification, comment posting
 ```
 
 ---
@@ -702,13 +699,13 @@ demo-elasticity/
 - **OOM detection reliability**: Exit 137 is clear. `rustc` LLVM errors may look different. System prompt covers both patterns but needs testing.
 - **Real repo vs. demo org**: Real public repo is more convincing but needs cleanup between demo runs. Dedicated demo org is safer.
 - **Snapshot durability**: How long do OC snapshots persist? Need to confirm they survive across days/weeks or have a re-creation mechanism.
-- **tsx in snapshot**: Need to verify that `npx tsx` works from pre-installed `node_modules` without a full `package.json` alongside the source. Fallback: sync `tsconfig.json` too, or use `node --import tsx/esm`.
+- **Snapshot overwrite semantics**: Does `snapshots.create()` with an existing name overwrite, or do we need delete+create? Current deploy script does delete+create to be safe. If OC adds tag/version support, we can use that instead.
 
 ## Resolved
 
 - **Agent is real code**: Standalone Node.js program using `query()` from `@anthropic-ai/claude-agent-sdk`. Not prompt-only via `sandbox.agent.start()`. Runs locally or in sandbox. See AGENTS.md for reasoning.
 - **No database in ingest-rs**: Pipeline writes JSON to stdout/response. No sqlx, no Postgres, no migrations. Monomorphization pressure comes from the generic pipeline across ~20 event types, not from DB code.
-- **Agent deployment split**: Deps (`node_modules/`) baked into snapshot. Source (`src/index.ts`, `prompt.md`) synced at runtime via `sandbox.files.write()`. Code changes don't require snapshot rebuild.
+- **Agent owns deployment**: `agent/scripts/deploy.ts` builds the snapshot. api/ just references `snapshot: "rust-agent"`. Clean separation — api/ has zero knowledge of agent internals.
 - **Status reporting**: Agent posts its own GitHub comments via `gh` CLI. api/ only posts initial ack and failure fallback.
 - **Framework**: Hono + raw fetch. No @octokit — only 2-3 GitHub API calls needed.
 - **Elasticity API contract**: Per `elasticity.md`. Not yet implemented in OC — demo assumes it ships. See Prerequisites.
