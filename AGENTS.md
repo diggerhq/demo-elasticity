@@ -1,39 +1,33 @@
 # demo-elasticity
 
-Demo scenario for OpenComputer's upcoming **elasticity** feature — the ability for an agent running inside a sandbox to dynamically request more (or fewer) compute resources without reprovisioning.
+Demo for OpenComputer's upcoming **elasticity** feature — live resource scaling for sandboxes without reprovisioning.
 
-## What This Demonstrates
-
-A ticket-resolving agent watches a GitHub repo. When someone comments `@myagent` on an issue, the agent picks it up, investigates, resolves it inside an OpenComputer sandbox, and submits a PR. The target repo is a Rust project — compilation is the bottleneck that triggers elastic scaling. The agent detects an OOM during `cargo build`, requests a burst of additional memory from within the sandbox, retries, and scales back down after compilation succeeds.
-
-**The pitch**: "I could set my sandbox to 16 GB permanently, but that's expensive for an agent that only needs burst memory for 2 minutes of compilation. With elasticity, the agent requests what it needs, when it needs it."
+An agent resolves GitHub issues in an OpenComputer sandbox. The target project is a Rust data ingestion service (`ingest-rs`) whose compilation requires more memory than the sandbox starts with. Instead of over-provisioning the sandbox for the entire session, the agent requests a burst of memory from inside the VM, compiles, and scales back down. You pay for 8 GB for 2 minutes of compilation instead of the full 15-minute session.
 
 ## Components
 
-### 1. `rust-app/` — Target Rust Project
+### 1. `ingest-rs/` — Data Ingestion Service (Rust)
 
-A realistic Rust application that genuinely requires significant memory to compile but is otherwise simple. Lives in its own directory (or separate repo) — this is what the agent checks out and works on when resolving issues.
+An HTTP service that receives events from webhooks, CSV uploads, and streaming sources, normalizes them through a typed transform pipeline, and writes to a database. Standard Rust stack: axum, serde, sqlx, tokio.
 
-Requirements:
-- Compilation must fail at 2 GB RAM and succeed at ≥8 GB
-- The app itself is straightforward (not artificially bloated)
-- Should look like a real project someone would maintain
+The compilation is memory-intensive because the generic transform pipeline is monomorphized across many concrete event types — each source has its own struct, and each goes through the same generic layers, which forces `rustc`/LLVM to generate and optimize a large amount of IR. This is normal for Rust projects with broad type surface; nothing is artificially inflated.
+
+Memory profile (clean build, `CARGO_BUILD_JOBS=1`):
+- 2 GB → OOM killed
+- 4 GB → gray zone
+- 8 GB → succeeds comfortably
 
 ### 2. `agent/` — Issue-Resolver Agent (Claude Agent SDK)
 
-Runs inside an OpenComputer sandbox. Uses Claude Agent SDK with tools for:
-- Reading GitHub issues and comments
-- Cloning repos, editing code, running builds
-- **Requesting resource changes** via the elasticity API (the new thing)
-- Creating branches and submitting PRs
+Runs inside an OpenComputer sandbox. Picks up GitHub issues, clones the repo, investigates, makes a fix, builds, tests, and submits a PR.
 
-The agent's system prompt encodes the workflow: triage → investigate → fix → build → test → PR.
+The agent knows how to use the elasticity API via its system prompt: when a build fails with OOM (exit 137, "killed", LLVM allocation errors), it checks current limits at `http://169.254.169.254/v1/limits`, scales up via `POST /v1/scale`, retries the build, then scales back down.
 
 ### 3. `api/` — Event Handler / Orchestration
 
-Reacts to GitHub webhook events (issue comment created), filters for `@myagent` mentions, and spins up the agent in an OpenComputer sandbox. Manages sandbox lifecycle, passes context to the agent, and reports status back to the issue.
+Receives GitHub webhooks (`issue_comment.created`), filters for `@myagent` mentions, creates an OpenComputer sandbox (starting at 2 GB — deliberately undersized for compilation), and starts the agent with the issue context. Posts status updates back to the issue thread.
 
-This is the "agent app" layer — later, patterns here may be extracted as experimental OpenComputer APIs.
+This is the "agent app" layer. Patterns that emerge here may later be extracted as experimental OpenComputer APIs.
 
 ## Elasticity API
 
