@@ -1,0 +1,17 @@
+{
+  "name": "demo-elasticity-agent",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.71"
+  },
+  "devDependencies": {
+    "@opencomputer/sdk": "^0.4",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}
