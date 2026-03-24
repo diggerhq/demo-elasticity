@@ -1,6 +1,7 @@
+import "dotenv/config";
 import { runAgent } from "../src/sandbox";
 
 await runAgent({
-  repo: "demo-org/ingest-rs",
+  repo: "diggerhq/demo-elasticity",
   issueNumber: 1,
 });

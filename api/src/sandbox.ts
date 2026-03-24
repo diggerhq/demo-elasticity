@@ -1,27 +1,34 @@
 import { Sandbox } from "@opencomputer/sdk";
 import { postComment } from "./github";
 
+// Checkpoint ID from deploy-manual.ts output
+const CHECKPOINT_ID = process.env.CHECKPOINT_ID ?? "03dc171a-c12d-455b-950f-bbd3f9db7a68";
+
+// Rust is installed in /workspace, not /root — need explicit env for exec
+const RUST_ENV = {
+  RUSTUP_HOME: "/workspace/.rustup",
+  CARGO_HOME: "/workspace/.cargo",
+  PATH: "/workspace/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+  RUST_BACKTRACE: "1",
+  AGENT_WORKDIR: "/workspace",
+  CARGO_BUILD_JOBS: "1",
+};
+
 interface RunContext {
   repo: string;
   issueNumber: number;
 }
 
 export async function runAgent(ctx: RunContext): Promise<void> {
-  // 1. Create sandbox — code is in snapshot, secrets come from SecretStore
-  const sandbox = await Sandbox.create({
-    snapshot: "rust-agent",
-    secretStore: "rust-agent",
+  const sandbox = await Sandbox.createFromCheckpoint(CHECKPOINT_ID, {
+    apiKey: process.env.OPENCOMPUTER_API_KEY,
+    apiUrl: process.env.OPENCOMPUTER_API_URL,
     timeout: 1800,
-    memoryMB: 2048,
-    envs: {
-      CARGO_BUILD_JOBS: "1",  // non-secret config only
-    },
   });
 
   console.log(`Sandbox ${sandbox.sandboxId} created for #${ctx.issueNumber}`);
 
   try {
-    // 2. Run agent
     const session = await sandbox.exec.start(
       "node",
       {
@@ -31,13 +38,17 @@ export async function runAgent(ctx: RunContext): Promise<void> {
           "--issue", String(ctx.issueNumber),
         ],
         cwd: "/workspace",
+        env: {
+          ...RUST_ENV,
+          ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "",
+          GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? "",
+        },
         timeout: 1500,
-        onStdout: (data) => process.stdout.write(data),
-        onStderr: (data) => process.stderr.write(data),
+        onStdout: (data: Uint8Array) => process.stdout.write(data),
+        onStderr: (data: Uint8Array) => process.stderr.write(data),
       },
     );
 
-    // 3. Wait for exit
     const exitCode = await session.done;
     console.log(`Agent exited: ${exitCode}`);
 
