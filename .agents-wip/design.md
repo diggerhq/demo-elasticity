@@ -433,6 +433,22 @@ PORT=3000                   # Server port (default 3000)
 
 `ANTHROPIC_API_KEY` and the sandbox's `GITHUB_TOKEN` are **not** here — they live in the OC SecretStore and are injected into the sandbox automatically. api/ only needs its own `GITHUB_TOKEN` for posting comments on behalf of the webhook handler.
 
+### Entry Point (`index.ts`)
+
+```typescript
+import { serve } from "@hono/node-server";
+import { Hono } from "hono";
+import { webhook } from "./webhook";
+
+const app = new Hono();
+app.route("/", webhook);
+app.get("/health", (c) => c.text("ok"));
+
+const port = parseInt(process.env.PORT ?? "3000");
+serve({ fetch: app.fetch, port });
+console.log(`Listening on :${port}`);
+```
+
 ### Webhook Handler (`webhook.ts`)
 
 ```typescript
@@ -703,6 +719,20 @@ demo-elasticity/
         ├── sandbox.ts             # Sandbox.create() + exec.start()
         └── github.ts              # Signature verification, comment posting
 ```
+
+---
+
+## Implementation Notes
+
+Things that aren't obvious from the code sketches alone:
+
+**OC SDK reference**: The OpenComputer TypeScript SDK source is at `../opencomputer/sdks/typescript/src/`. Read this for exact method signatures — the code sketches in this doc are accurate but not exhaustive. Key files: `sandbox.ts`, `exec.ts`, `filesystem.ts`, `image.ts` (Node.js-only import from `@opencomputer/sdk/dist/image.js`), `snapshot.ts` (Node.js-only import from `@opencomputer/sdk/dist/snapshot.js`).
+
+**Do NOT use `addLocalDir` in deploy.ts**: The deploy script uses explicit `addLocalFile()` calls for a reason. `addLocalDir(".")` recursively base64-encodes every file into the snapshot manifest — including `node_modules/` — which would be enormous and broken. The snapshot's `npm ci` installs deps cleanly from the uploaded `package.json` + `package-lock.json`.
+
+**ingest-rs lives here, deployed separately**: `ingest-rs/` source is developed in this repo. For the demo, it gets pushed to a separate GitHub repo (e.g. `demo-org/ingest-rs`) where the demo issue lives. The agent inside the sandbox clones it from GitHub via `gh repo clone`. Changes to `ingest-rs/` here need to be pushed to the demo repo separately.
+
+**Agent SDK `query()` returns an async generator**: The stream yields `SDKMessage` objects. The code sketch handles `"assistant"` and `"result"` types. For the full type union, check the SDK types at `../base360-checkin-agent/agent/node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts` or the SDK source.
 
 ---
 

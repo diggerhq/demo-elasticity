@@ -27,7 +27,7 @@ The agent uses the elasticity API from inside the sandbox: when a build OOMs, it
 
 ### 3. `api/` — Event Handler / Orchestration
 
-Receives GitHub webhooks (`issue_comment.created`), filters for `@myagent` mentions, creates an OpenComputer sandbox (starting at 2 GB — deliberately undersized for compilation), deploys the agent code into it, and runs it. Posts status updates back to the issue thread.
+Receives GitHub webhooks (`issue_comment.created`), filters for `@myagent` mentions, creates an OpenComputer sandbox from the agent's pre-built snapshot (starting at 2 GB — deliberately undersized for compilation), and runs the agent. Posts status updates back to the issue thread. Has zero knowledge of agent internals — just a snapshot name, secret store name, entry point path, and CLI args.
 
 ## Elasticity API
 
