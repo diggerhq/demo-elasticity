@@ -42,7 +42,7 @@ const stream = query({
     allowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
     permissionMode: "acceptEdits",
     cwd: workdir,
-    maxTurns: 50,
+    maxTurns: 200,
   },
 });
 
