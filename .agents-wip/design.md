@@ -109,9 +109,40 @@ agent/
     └── settings.json      # tool permissions
 ```
 
-### Sandbox Requirements
+### Sandbox Template: `rust-agent` Snapshot
 
-Rust toolchain, `gh` CLI, git, curl. Baked into a custom template (`rust-agent`) for fast boot — installing Rust at runtime would add minutes.
+Use OpenComputer's declarative image + snapshot system. The default base template already has `build-essential`, `git`, `curl`, `libssl-dev`, `pkg-config` — everything Rust needs as system deps. We just add the Rust toolchain and `gh` CLI on top.
+
+```typescript
+import { Image, Snapshots } from '@opencomputer/sdk';
+
+const rustAgentImage = Image.base()
+  .runCommands(
+    'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y',
+  )
+  .aptInstall(['gh'])
+  .env({
+    PATH: '/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    RUST_BACKTRACE: '1',
+  })
+  .workdir('/workspace');
+
+// Create once — persists org-wide, cached by content hash
+const snapshots = new Snapshots({ apiKey, apiUrl });
+await snapshots.create({
+  name: 'rust-agent',
+  image: rustAgentImage,
+  onBuildLogs: (log) => console.log(log),
+});
+```
+
+Then sandboxes boot instantly from the snapshot — no image build, no Rust install:
+
+```typescript
+const sandbox = await Sandbox.create({ snapshot: 'rust-agent', memoryMB: 2048 });
+```
+
+If we need to update the snapshot later (e.g. add `cargo-audit`), we can apply a patch to the checkpoint without rebuilding from scratch.
 
 ## Component 3: Event Handler / API (`api/`)
 
@@ -125,7 +156,7 @@ GitHub webhook (issue_comment.created)
   → verify signature
   → if body contains "@myagent":
       → comment on issue: "On it..."
-      → Sandbox.create({ template: "rust-agent", memoryMB: 2048, ... })
+      → Sandbox.create({ snapshot: "rust-agent", memoryMB: 2048, ... })
       → start agent session with issue context in prompt
       → stream agent events, post status comments
       → on completion: comment with PR link or error
@@ -138,7 +169,7 @@ Sandbox starts at 2 GB deliberately. The agent hits the wall and scales up — t
 
 ```typescript
 const sandbox = await Sandbox.create({
-  template: "rust-agent",
+  snapshot: "rust-agent",
   timeout: 1800,
   memoryMB: 2048,
   cpuCount: 2,
@@ -168,8 +199,11 @@ Agent posts its own status comments via `gh issue comment` — more natural, sho
 
 ## Open Questions
 
-- **Sandbox template**: custom `rust-agent` with Rust + gh pre-installed, or install at boot? Pre-installed is faster and more demo-friendly.
 - **Real repo or dedicated demo org**: Real public repo is more convincing but needs cleanup between runs.
 - **Calibration**: Need to empirically verify the memory profile by building `ingest-rs` under constrained memory. Number of source event structs is the tuning lever.
 - **OOM detection**: Exit 137 is clear. `rustc` may also fail with LLVM errors that don't look like OOM. System prompt should cover both patterns.
 - **Scale-down timing**: After `cargo build` succeeds, before tests — tests don't recompile so they're cheap.
+
+## Resolved
+
+- **Sandbox template**: Declarative snapshot via `Image.base().runCommands(rustup).aptInstall([gh])`. Default base already has build-essential, git, curl, libssl-dev. Snapshot persists org-wide, boots instantly. Patches available for post-creation updates.
