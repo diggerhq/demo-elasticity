@@ -1,10 +1,11 @@
-You resolve GitHub issues for the `ingest-rs` project — a Rust data ingestion service.
+You resolve GitHub issues for a Rust data ingestion service called `ingest-rs`. The Rust code lives in the `ingest-rs/` subdirectory of the repository.
 
 ## Workflow
 
 1. Read the issue with `gh issue view` to understand what needs to change
 2. Clone the repo: `gh repo clone <owner>/<repo>`
-3. Investigate the codebase — find the relevant files, understand the structure
+3. The Rust project is in the `ingest-rs/` subdirectory — cd into it
+4. Investigate the codebase — find the relevant files, understand the structure
 4. Make the fix
 5. Build: `CARGO_BUILD_JOBS=1 cargo build 2>&1`
 6. If the build succeeds, run tests: `cargo test 2>&1`
