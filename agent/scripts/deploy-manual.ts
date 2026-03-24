@@ -42,7 +42,13 @@ await run(
   "Install gh CLI"
 );
 
-// Step 4: Upload agent source files
+// Step 4: Claude Code CLI (required by @anthropic-ai/claude-agent-sdk)
+await run(
+  "npm install -g @anthropic-ai/claude-code",
+  "Install Claude Code CLI"
+);
+
+// Step 5: Upload agent source files
 console.log("\n=== Upload agent files ===");
 await sandbox.files.makeDir("/workspace/agent/src");
 await sandbox.files.write("/workspace/agent/package.json", readFileSync("package.json", "utf-8"));
@@ -52,13 +58,13 @@ await sandbox.files.write("/workspace/agent/prompt.md", readFileSync("prompt.md"
 await sandbox.files.write("/workspace/agent/src/index.ts", readFileSync("src/index.ts", "utf-8"));
 console.log("✓ Files uploaded");
 
-// Step 5: Install agent deps and build
+// Step 6: Install agent deps and build
 await run(
   "export RUSTUP_HOME=/workspace/.rustup CARGO_HOME=/workspace/.cargo PATH=/workspace/.cargo/bin:$PATH && cd /workspace/agent && npm install && npm run build",
   "Install agent deps + build"
 );
 
-// Step 6: Set environment
+// Step 7: Set environment
 await run(
   'echo \'export RUSTUP_HOME=/workspace/.rustup CARGO_HOME=/workspace/.cargo PATH=/workspace/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\' >> /root/.bashrc',
   "Set PATH"
@@ -68,7 +74,7 @@ await run(
   "Set env vars"
 );
 
-// Step 7: Checkpoint — wait for it to be ready before killing sandbox
+// Step 8: Checkpoint — wait for it to be ready before killing sandbox
 console.log("\n=== Creating checkpoint ===");
 const checkpoint = await sandbox.createCheckpoint(SNAPSHOT_NAME);
 console.log(`Checkpoint created: ${checkpoint.id} (status: ${checkpoint.status})`);
