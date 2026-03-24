@@ -1,54 +1,40 @@
-//! Storage backend for persisting processed events to S3.
-//! Uses aws-sdk-s3 + reqwest for uploading batches.
+//! Storage backend for persisting processed events via HTTP.
+//! Uses reqwest for uploading batches to a remote endpoint.
 
-use aws_config::BehaviorVersion;
-use aws_sdk_s3::Client as S3Client;
 use reqwest::Client as HttpClient;
 use serde::Serialize;
 
 use crate::unified::UnifiedEvent;
 
-/// S3-backed storage for processed events.
+/// HTTP-backed storage for processed events.
 pub struct EventStore {
-    s3: S3Client,
     http: HttpClient,
-    bucket: String,
+    endpoint: String,
 }
 
 impl EventStore {
-    pub async fn new(bucket: &str) -> Self {
-        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
+    pub fn new(endpoint: &str) -> Self {
         Self {
-            s3: S3Client::new(&config),
             http: HttpClient::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("http client"),
-            bucket: bucket.to_string(),
+            endpoint: endpoint.to_string(),
         }
     }
 
-    /// Upload a batch of events as a JSON Lines file to S3.
-    pub async fn upload_batch(&self, key: &str, events: &[UnifiedEvent]) -> Result<(), String> {
-        let body: String = events
-            .iter()
-            .map(|e| serde_json::to_string(e).unwrap_or_default())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        self.s3
-            .put_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .body(body.into_bytes().into())
+    /// Upload a batch of events as JSON to the configured endpoint.
+    pub async fn upload_batch(&self, events: &[UnifiedEvent]) -> Result<(), String> {
+        self.http
+            .post(&self.endpoint)
+            .json(&events)
             .send()
             .await
-            .map_err(|e| format!("S3 upload failed: {}", e))?;
-
+            .map_err(|e| format!("upload failed: {}", e))?;
         Ok(())
     }
 
-    /// Webhook notification via HTTP POST after batch upload.
+    /// Webhook notification via HTTP POST.
     pub async fn notify_webhook(&self, url: &str, event: &impl Serialize) -> Result<(), String> {
         self.http
             .post(url)
@@ -56,7 +42,6 @@ impl EventStore {
             .send()
             .await
             .map_err(|e| format!("webhook notify failed: {}", e))?;
-
         Ok(())
     }
 }
