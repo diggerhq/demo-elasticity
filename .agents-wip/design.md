@@ -23,33 +23,33 @@ import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
 ## Architecture
 
 ```
-┌─────────────┐    webhook     ┌─────────────┐   OC SDK    ┌──────────────────────┐
-│   GitHub     │──────────────▶│   api/       │────────────▶│  OpenComputer        │
-│   (issues)   │◀──────────────│   (Hono)     │             │  Sandbox (2 GB)      │
-│              │  gh issue     └─────────────┘             │                      │
-│              │  comment                                   │  ┌──────────────┐    │
-│              │◀───────────────────────────────────────────│──│  Agent        │    │
-│              │                                            │  │  (Claude SDK) │    │
-└─────────────┘                                            │  └──────┬───────┘    │
-                                                           │         │            │
-                                                           │   curl 169.254.169.254
-                                                           │         │            │
-                                                           │  ┌──────▼───────┐    │
-                                                           │  │  Metadata    │    │
-                                                           │  │  Service     │    │
-                                                           │  │  /v1/scale   │    │
-                                                           │  └──────────────┘    │
-                                                           └──────────────────────┘
+┌─────────────┐    webhook     ┌─────────────┐  OC SDK     ┌──────────────────────────┐
+│   GitHub     │──────────────▶│   api/       │────────────▶│  OpenComputer Sandbox     │
+│   (issues)   │◀──────────────│   (Hono)     │  exec.start │  (2 GB → 8 GB → 2 GB)    │
+│              │  gh comment   └─────────────┘             │                          │
+│              │◀──────────────────────────────────────────│──┐                       │
+└─────────────┘                                           │  │ agent/ (Node.js)       │
+                                                          │  │ query() → Claude API   │
+                                                          │  │   ↕ tool calls         │
+                                                          │  │ bash, read, edit, ...  │
+                                                          │  │   ↕                    │
+                                                          │  │ curl 169.254.169.254   │
+                                                          │  │   → /v1/scale          │
+                                                          │  └────────────────────────│
+                                                          └──────────────────────────┘
 ```
 
 **Data flow**:
-1. `api/` receives GitHub webhook, creates sandbox, starts agent
-2. Agent works autonomously inside sandbox (clone, fix, build, test, PR)
-3. Agent hits OOM → talks to metadata service to scale up → retries → scales down
+1. `api/` receives GitHub webhook, creates sandbox, runs agent as a process
+2. Agent (real Node.js program using Claude Agent SDK) works autonomously — clone, fix, build, test, PR
+3. Agent hits OOM → calls metadata service to scale up → retries → scales down
 4. Agent posts status to GitHub via `gh` CLI (not through api/)
-5. `api/` monitors agent events; posts failure comment only if agent crashes silently
+5. `api/` monitors exec session exit code; posts failure comment only if agent crashes silently
 
-**Key design choice**: The agent is self-sufficient. `api/` is a thin launcher — it doesn't relay messages, stream events to a UI, or manage multi-turn conversation. This is simpler than the sessions-api/bolt-new-poc pattern because there's no interactive user.
+**Key design choices**:
+- **Agent is real code**: A standalone Node.js program using `@anthropic-ai/claude-agent-sdk`'s `query()` API. Runs locally or in a sandbox. The sandbox is compute, not an agent framework. See AGENTS.md for full reasoning.
+- **api/ uses `sandbox.exec`**: Not `sandbox.agent.start()`. The agent is deployed as code, not as a prompt config.
+- **Agent is self-sufficient**: `api/` is a thin launcher — no message relay, no event streaming, no multi-turn.
 
 ---
 
@@ -131,25 +131,124 @@ Tuning lever: number of source event structs. More structs = more monomorphizati
 
 ## Component 2: Agent (`agent/`)
 
-Claude Agent SDK, runs inside an OpenComputer sandbox via `sandbox.agent.start()`. The agent wrapper (`claude-agent-wrapper`) is pre-installed in the base image — we don't ship any code for this, just a system prompt.
+A standalone Node.js application using `@anthropic-ai/claude-agent-sdk`. Resolves a GitHub issue by cloning the repo, investigating, fixing, building, testing, and opening a PR.
 
-### How It's Loaded
+Can run locally:
+```bash
+cd agent
+ANTHROPIC_API_KEY=... GITHUB_TOKEN=... npx tsx src/index.ts --repo owner/repo --issue 42
+```
 
-The system prompt lives at `agent/prompt.md` in this repo. At runtime, `api/` reads it and passes it as the `systemPrompt` parameter to `sandbox.agent.start()`. No files are synced into the sandbox for agent config — the SDK handles it.
+Or inside an OpenComputer sandbox (deployed by api/, baked into the snapshot).
 
-The issue-specific context (repo, issue number, title, body) is passed as the `prompt` parameter — the first user message that kicks off the agent.
+### Dependencies
 
-### System Prompt (`agent/prompt.md`)
+```json
+{
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.71"
+  },
+  "devDependencies": {
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}
+```
 
-Full content — this is what the agent sees:
+Single meaningful dependency. The SDK handles tool execution (bash, file ops), Claude API calls, and the agentic loop.
+
+### Structure
+
+```
+agent/
+├── package.json
+├── tsconfig.json
+├── src/
+│   └── index.ts           # Entry point — parses args, runs query(), handles result
+└── prompt.md              # System prompt — loaded by index.ts at runtime
+```
+
+### Entry Point (`src/index.ts`)
+
+```typescript
+import { query } from "@anthropic-ai/claude-agent-sdk";
+import { readFileSync } from "node:fs";
+import { parseArgs } from "node:util";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const { values } = parseArgs({
+  options: {
+    repo:  { type: "string" },
+    issue: { type: "string" },
+  },
+  strict: true,
+});
+
+if (!values.repo || !values.issue) {
+  console.error("Usage: index.ts --repo owner/repo --issue 42");
+  process.exit(1);
+}
+
+const systemPrompt = readFileSync(join(__dirname, "../prompt.md"), "utf-8");
+
+const stream = query({
+  prompt: [
+    `Resolve this GitHub issue.`,
+    ``,
+    `Repository: ${values.repo}`,
+    `Issue number: ${values.issue}`,
+    ``,
+    `Start by running: gh issue view ${values.issue} --repo ${values.repo}`,
+  ].join("\n"),
+  options: {
+    model: "claude-sonnet-4-20250514",
+    systemPrompt,
+    tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
+    allowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
+    permissionMode: "bypassPermissions",
+    allowDangerouslySkipPermissions: true,
+    cwd: "/workspace",
+    maxTurns: 50,
+  },
+});
+
+let exitCode = 0;
+
+for await (const message of stream) {
+  // Log progress
+  if (message.type === "assistant" && message.message?.content) {
+    for (const block of message.message.content) {
+      if (block.type === "text") {
+        console.log("[agent]", block.text?.slice(0, 200));
+      }
+    }
+  }
+
+  if (message.type === "result") {
+    if (message.subtype === "success") {
+      console.log("Agent completed successfully.");
+    } else {
+      console.error("Agent failed:", message.result ?? "unknown error");
+      exitCode = 1;
+    }
+  }
+}
+
+process.exit(exitCode);
+```
+
+### System Prompt (`prompt.md`)
 
 ```markdown
 You resolve GitHub issues for the `ingest-rs` project — a Rust data ingestion service.
 
 ## Workflow
 
-1. Clone the repo: `gh repo clone <owner>/<repo>`
-2. Read the issue to understand what needs to change
+1. Read the issue with `gh issue view` to understand what needs to change
+2. Clone the repo: `gh repo clone <owner>/<repo>`
 3. Investigate the codebase — find the relevant files, understand the structure
 4. Make the fix
 5. Build: `CARGO_BUILD_JOBS=1 cargo build 2>&1`
@@ -159,19 +258,21 @@ You resolve GitHub issues for the `ingest-rs` project — a Rust data ingestion 
 
 ## Resource Scaling
 
-The sandbox starts with limited memory. If a build or test fails due to insufficient memory, you can scale up.
+The sandbox starts with limited memory. If a build or test fails due to insufficient
+memory, you can scale up.
 
 **Detection**: Look for exit code 137, "Killed" in output, or LLVM allocation errors like:
 - `LLVM ERROR: out of memory`
 - `error: could not compile` with signal 9
 - `fatal runtime error: out of memory`
 
-**Scaling**:
+**Scaling** (via instance metadata service):
 - Check current limits: `curl -s http://169.254.169.254/v1/limits`
 - Scale up: `curl -s -X POST http://169.254.169.254/v1/scale -H "Content-Type: application/json" -d '{"memoryMB": 8192}'`
 - After the memory-intensive step completes, scale back down: `curl -s -X POST http://169.254.169.254/v1/scale -H "Content-Type: application/json" -d '{"memoryMB": 2048}'`
 
-Scale down after compilation succeeds but before running tests — tests don't trigger recompilation so they need much less memory.
+Scale down after compilation succeeds but before running tests — tests don't trigger
+recompilation so they need much less memory.
 
 ## Rules
 
@@ -181,75 +282,29 @@ Scale down after compilation succeeds but before running tests — tests don't t
 - PR body should reference the issue: `Fixes #<number>`
 ```
 
-### Agent SDK Configuration
+### Running Locally vs. In Sandbox
 
-```typescript
-const session = await sandbox.agent.start({
-  prompt: `Resolve this GitHub issue:\n\nRepo: ${repo}\nIssue #${issueNumber}: ${issueTitle}\n\n${issueBody}`,
-  systemPrompt: agentPrompt,       // loaded from agent/prompt.md
-  allowedTools: ["bash", "read", "write", "edit", "glob", "grep"],
-  permissionMode: "bypassPermissions",
-  cwd: "/workspace",
-  onEvent: (event) => handleAgentEvent(event, context),
-  onError: (data) => console.error("[agent stderr]", data),
-  onExit: (code) => handleAgentExit(code, context),
-});
-```
+The same code runs in both environments. The only differences are:
+- **Locally**: `cwd` would be wherever you want to clone into. The elasticity `curl` commands will 404 (no metadata service), but the build will just work if your machine has enough RAM.
+- **In sandbox**: `cwd` is `/workspace`. Elasticity API is available. `GITHUB_TOKEN` is injected by the sandbox env.
 
-### Agent Events We Care About
-
-From the SDK, `AgentEvent.type` values:
-- `"result"` — agent finished (success or failure). `event.subtype` is `"success"` or `"error"`.
-- `"error"` — agent SDK error (not a tool error — an infrastructure failure).
-- `"assistant"` — agent message (for logging/debugging, not surfaced to GitHub).
-- `"tool_use_summary"` — tool invocation summary (useful for logs).
-
-We don't need to handle `"turn_complete"` or `"interrupted"` — this is a single-shot run, not interactive.
-
-### Sandbox Template: `rust-agent` Snapshot
-
-The base OC template already includes `build-essential`, `git`, `curl`, `libssl-dev`, `pkg-config`. We layer Rust + gh CLI on top.
-
-```typescript
-import { Image } from "@opencomputer/sdk/dist/image.js";
-import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
-
-const rustAgentImage = Image.base()
-  .runCommands(
-    'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y',
-  )
-  .aptInstall(["gh"])
-  .env({
-    PATH: "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    RUST_BACKTRACE: "1",
-  })
-  .workdir("/workspace");
-
-const snapshots = new Snapshots({ apiKey, apiUrl });
-await snapshots.create({
-  name: "rust-agent",
-  image: rustAgentImage,
-  onBuildLogs: (log) => console.log(log),
-});
-```
-
-This is run once via `scripts/create-snapshot.ts`. Sandboxes then boot instantly from the snapshot.
+No code changes, no conditional logic. The agent doesn't know or care where it's running.
 
 ---
 
 ## Component 3: Event Handler / API (`api/`)
 
-Thin webhook handler + sandbox launcher. No database, no event persistence, no UI. Receives a GitHub webhook, spins up a sandbox, starts the agent, monitors for completion.
+Thin webhook handler + sandbox launcher. Receives a GitHub webhook, creates a sandbox, runs the agent as a process via `sandbox.exec`, monitors exit.
 
 ### Dependencies
 
-- `hono` — HTTP framework (consistent with agents-api pattern)
-- `@opencomputer/sdk` — sandbox creation + agent sessions
+- `hono` — HTTP framework
+- `@opencomputer/sdk` — sandbox creation + exec
 - `@hono/node-server` — run Hono on Node.js
 - Node.js `crypto` — HMAC-SHA256 webhook signature verification
 - `fetch` (built-in) — GitHub API calls for posting comments
 
-No @octokit — we only make 2-3 GitHub API calls (post comment), raw `fetch` is simpler.
+No @octokit — we only make 2-3 GitHub API calls, raw `fetch` is simpler.
 
 ### Structure
 
@@ -261,26 +316,20 @@ api/
 ├── src/
 │   ├── index.ts            # Hono app, bind routes, start server
 │   ├── webhook.ts          # POST /webhooks/github — verify, parse, dispatch
-│   ├── sandbox.ts          # createSandbox(), startAgent(), killSandbox()
-│   └── github.ts           # postComment(), verifySignature() — thin wrappers
+│   ├── sandbox.ts          # createSandbox(), runAgent(), killSandbox()
+│   └── github.ts           # postComment(), verifySignature()
 └── scripts/
-    └── create-snapshot.ts  # One-time: build rust-agent snapshot
+    └── create-snapshot.ts  # One-time: build snapshot with Rust + Node.js + agent
 ```
 
 ### API Surface
-
-Single endpoint:
 
 ```
 POST /webhooks/github
   Headers: X-Hub-Signature-256, X-GitHub-Event
   Body: GitHub webhook payload (issue_comment.created)
   Response: 200 OK (immediate, async processing)
-```
 
-Plus a health check:
-
-```
 GET /health
   Response: 200 OK
 ```
@@ -288,9 +337,8 @@ GET /health
 ### Environment Variables
 
 ```bash
-# api/ server
 OPENCOMPUTER_API_KEY=       # OC API key for sandbox creation
-OPENCOMPUTER_API_URL=       # OC API endpoint (e.g. https://api.opencomputer.dev)
+OPENCOMPUTER_API_URL=       # OC API endpoint
 GITHUB_TOKEN=               # PAT with repo scope — for posting comments + passed to sandbox
 GITHUB_WEBHOOK_SECRET=      # Shared secret for webhook HMAC verification
 ANTHROPIC_API_KEY=          # Passed through to sandbox for Claude agent
@@ -302,14 +350,13 @@ PORT=3000                   # Server port (default 3000)
 ```typescript
 import { Hono } from "hono";
 import { verifySignature, postComment } from "./github";
-import { launchAgent } from "./sandbox";
+import { runAgent } from "./sandbox";
 
 const TRIGGER = "@myagent";
 
 export const webhook = new Hono();
 
 webhook.post("/webhooks/github", async (c) => {
-  // 1. Verify HMAC-SHA256 signature
   const body = await c.req.text();
   const sig = c.req.header("x-hub-signature-256") ?? "";
   if (!verifySignature(body, sig)) return c.text("bad signature", 401);
@@ -319,33 +366,18 @@ webhook.post("/webhooks/github", async (c) => {
 
   const payload = JSON.parse(body);
   if (payload.action !== "created") return c.text("ignored", 200);
+  if (!payload.comment.body.includes(TRIGGER)) return c.text("ignored", 200);
 
-  const comment = payload.comment.body as string;
-  if (!comment.includes(TRIGGER)) return c.text("ignored", 200);
-
-  // 2. Extract issue context
-  const issue = payload.issue;
-  const repo = payload.repository.full_name;  // "owner/repo"
-  const context = {
-    repo,
-    issueNumber: issue.number as number,
-    issueTitle: issue.title as string,
-    issueBody: issue.body as string,
-    commentUrl: payload.comment.html_url as string,
+  const ctx = {
+    repo: payload.repository.full_name,
+    issueNumber: payload.issue.number,
   };
 
-  // 3. Acknowledge immediately, process async
-  //    Post "On it..." comment before returning
-  await postComment(repo, context.issueNumber,
-    `⏳ Working on it — sandbox starting...`
-  );
+  await postComment(ctx.repo, ctx.issueNumber, "⏳ Working on it — sandbox starting...");
 
-  // 4. Launch agent in background (don't await in request handler)
-  launchAgent(context).catch((err) => {
-    console.error("Agent launch failed:", err);
-    postComment(repo, context.issueNumber,
-      `❌ Agent failed to start: ${err.message}`
-    ).catch(() => {});
+  runAgent(ctx).catch((err) => {
+    console.error("Agent failed:", err);
+    postComment(ctx.repo, ctx.issueNumber, `❌ Agent failed: ${err.message}`).catch(() => {});
   });
 
   return c.text("ok", 200);
@@ -357,24 +389,18 @@ webhook.post("/webhooks/github", async (c) => {
 ```typescript
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-const WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET!;
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN!;
-
 export function verifySignature(payload: string, signature: string): boolean {
-  const expected = "sha256=" + createHmac("sha256", WEBHOOK_SECRET)
-    .update(payload)
-    .digest("hex");
+  const expected = "sha256=" + createHmac("sha256", process.env.GITHUB_WEBHOOK_SECRET!)
+    .update(payload).digest("hex");
   if (expected.length !== signature.length) return false;
   return timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
 }
 
-export async function postComment(
-  repo: string, issueNumber: number, body: string,
-): Promise<void> {
-  await fetch(`https://api.github.com/repos/${repo}/issues/${issueNumber}/comments`, {
+export async function postComment(repo: string, issue: number, body: string): Promise<void> {
+  await fetch(`https://api.github.com/repos/${repo}/issues/${issue}/comments`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ body }),
@@ -384,68 +410,59 @@ export async function postComment(
 
 ### Sandbox Orchestration (`sandbox.ts`)
 
+This is where the new design differs from the old one. No `sandbox.agent.start()` — we run the agent as a regular process.
+
 ```typescript
 import { Sandbox } from "@opencomputer/sdk";
-import { readFileSync } from "node:fs";
 import { postComment } from "./github";
 
-const agentPrompt = readFileSync("../agent/prompt.md", "utf-8");
-
-interface IssueContext {
+interface RunContext {
   repo: string;
   issueNumber: number;
-  issueTitle: string;
-  issueBody: string;
 }
 
-export async function launchAgent(ctx: IssueContext): Promise<void> {
+export async function runAgent(ctx: RunContext): Promise<void> {
+  // 1. Create sandbox from snapshot (agent code is baked in)
   const sandbox = await Sandbox.create({
     snapshot: "rust-agent",
-    timeout: 1800,                        // 30 min max
-    memoryMB: 2048,                       // deliberately undersized
+    timeout: 1800,
+    memoryMB: 2048,
     envs: {
       GITHUB_TOKEN: process.env.GITHUB_TOKEN!,
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY!,
-      CARGO_BUILD_JOBS: "1",              // predictable memory usage
+      CARGO_BUILD_JOBS: "1",
     },
   });
 
-  console.log(`Sandbox created: ${sandbox.sandboxId} for issue #${ctx.issueNumber}`);
+  console.log(`Sandbox ${sandbox.sandboxId} created for issue #${ctx.issueNumber}`);
 
   try {
-    const session = await sandbox.agent.start({
-      prompt: [
-        `Resolve this GitHub issue:`,
-        ``,
-        `Repo: ${ctx.repo}`,
-        `Issue #${ctx.issueNumber}: ${ctx.issueTitle}`,
-        ``,
-        ctx.issueBody,
-      ].join("\n"),
-      systemPrompt: agentPrompt,
-      allowedTools: ["bash", "read", "write", "edit", "glob", "grep"],
-      permissionMode: "bypassPermissions",
-      cwd: "/workspace",
-      onEvent: (event) => {
-        // Log all events for observability
-        console.log(`[agent:${sandbox.sandboxId}] ${event.type}`,
-          event.type === "tool_use_summary" ? event.tool : "");
+    // 2. Run agent as a process — the same command you'd run locally
+    const session = await sandbox.exec.start(
+      "node",
+      {
+        args: [
+          "/workspace/agent/dist/index.js",
+          "--repo", ctx.repo,
+          "--issue", String(ctx.issueNumber),
+        ],
+        cwd: "/workspace",
+        timeout: 1500,  // 25 min (sandbox timeout is 30)
+        onStdout: (data) => process.stdout.write(data),
+        onStderr: (data) => process.stderr.write(data),
       },
-      onError: (data) => {
-        console.error(`[agent:${sandbox.sandboxId}] error:`, data);
-      },
-    });
+    );
 
-    // Wait for agent to finish
+    // 3. Wait for agent process to exit
     const exitCode = await session.done;
-    console.log(`Agent exited with code ${exitCode}`);
+    console.log(`Agent exited: ${exitCode}`);
 
     if (exitCode !== 0) {
       await postComment(ctx.repo, ctx.issueNumber,
         `❌ Agent exited with code ${exitCode}. Check logs for details.`
       );
     }
-    // On success: the agent already posted its own comment with the PR link
+    // On success: agent already posted its own comment with PR link
   } finally {
     await sandbox.kill();
     console.log(`Sandbox ${sandbox.sandboxId} killed`);
@@ -453,45 +470,125 @@ export async function launchAgent(ctx: IssueContext): Promise<void> {
 }
 ```
 
+**Key difference**: `sandbox.exec.start("node", { args: [...] })` runs the agent as a plain process. The OC SDK just provides compute + I/O streaming. All agent logic is in our code.
+
 ### Concurrency
 
-For the demo, one agent at a time is fine. If a second webhook arrives while an agent is running, `launchAgent` spawns a second sandbox — no coordination needed. For production use this would need a queue, but this is a demo.
+For the demo, one agent at a time is fine. Each webhook spawns an independent sandbox — no coordination needed.
 
 ### Deployment
 
 - **Dev**: Run locally + ngrok/cloudflare tunnel for webhook delivery
 - **Demo**: Fly.io (single machine, same pattern as agents-control)
-- **Config**: GitHub webhook pointing at `https://<host>/webhooks/github` with `issue_comment` events enabled
+
+---
+
+## Snapshot: `rust-agent`
+
+The snapshot includes everything the agent needs to run: Rust toolchain, Node.js, gh CLI, and the agent code itself. Built once, boots instantly.
+
+### What's In It
+
+| Layer | What | Why |
+|-------|------|-----|
+| OC base image | Ubuntu, build-essential, git, curl, libssl-dev, pkg-config, python3 | Already there |
+| Rust | `rustup` + stable toolchain | Compile ingest-rs |
+| Node.js 22 | Via nodesource | Run the agent |
+| gh CLI | Via apt | GitHub interaction from agent |
+| Agent code | `agent/` directory with node_modules + built dist | The agent program |
+
+### Build Script (`scripts/create-snapshot.ts`)
+
+```typescript
+import { Image } from "@opencomputer/sdk/dist/image.js";
+import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
+
+const apiKey = process.env.OPENCOMPUTER_API_KEY!;
+const apiUrl = process.env.OPENCOMPUTER_API_URL!;
+
+const image = Image.base()
+  // Rust toolchain
+  .runCommands(
+    'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y',
+  )
+  // Node.js 22 (for the agent)
+  .runCommands(
+    "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
+    "apt-get install -y nodejs",
+  )
+  // gh CLI
+  .aptInstall(["gh"])
+  // Agent code — baked into snapshot
+  .addLocalDir("../agent", "/workspace/agent")
+  .runCommands(
+    "cd /workspace/agent && npm install && npm run build",
+  )
+  // Environment
+  .env({
+    PATH: "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    RUST_BACKTRACE: "1",
+  })
+  .workdir("/workspace");
+
+const snapshots = new Snapshots({ apiKey, apiUrl });
+await snapshots.create({
+  name: "rust-agent",
+  image,
+  onBuildLogs: (log) => console.log(log),
+});
+
+console.log("Snapshot 'rust-agent' created.");
+```
+
+### When to Rebuild
+
+Rebuild the snapshot when:
+- Agent code changes (new prompt, new logic in index.ts)
+- Rust toolchain version needs updating
+- New system dependencies added
+
+For active development, this is mildly annoying. But the snapshot builds in a few minutes, and it's the same model as Docker images — you rebuild when your Dockerfile inputs change. A future improvement would be a dev mode that syncs agent code at runtime via `sandbox.files`, but that's not needed for the demo.
 
 ---
 
 ## Setup & Bootstrap
 
-### One-Time: Create Snapshot
+### 1. Build the Agent
 
 ```bash
-cd api/
+cd agent
+npm install
+npm run build    # tsc → dist/
+```
+
+Verify locally:
+```bash
+ANTHROPIC_API_KEY=... GITHUB_TOKEN=... npx tsx src/index.ts --repo owner/repo --issue 42
+```
+
+### 2. Create the Snapshot
+
+```bash
+cd api
 OPENCOMPUTER_API_KEY=... OPENCOMPUTER_API_URL=... npx tsx scripts/create-snapshot.ts
 ```
 
-This builds the `rust-agent` snapshot (Rust toolchain + gh CLI on base image). Takes a few minutes. After that, sandboxes boot from it instantly.
-
-### One-Time: Create Demo Repo
+### 3. Push ingest-rs
 
 Push `ingest-rs/` to a GitHub repo (e.g. `demo-org/ingest-rs`). Create the demo issue: "Batch endpoint response is missing `processed_at` timestamp". Leave it open.
 
-### One-Time: Configure GitHub Webhook
+### 4. Configure GitHub Webhook
 
 On the repo, add a webhook:
 - URL: `https://<api-host>/webhooks/github`
 - Content type: `application/json`
 - Secret: same as `GITHUB_WEBHOOK_SECRET`
-- Events: select "Issue comments" only
+- Events: "Issue comments" only
 
-### Run
+### 5. Run the API
 
 ```bash
-cd api/
+cd api
 cp .env.example .env   # fill in values
 npm install
 npm run dev             # starts on :3000
@@ -501,39 +598,38 @@ Then comment `@myagent resolve this` on the demo issue.
 
 ---
 
-## Full Sequence (detail)
+## Full Sequence
 
 ```
 Time  What
 ─────────────────────────────────────────────────────
 0:00  User comments "@myagent resolve this" on issue #42
-0:01  GitHub sends POST /webhooks/github to api/
-0:01  api/ verifies signature, parses payload
-0:01  api/ posts "Working on it..." comment via GitHub API
-0:02  api/ calls Sandbox.create({ snapshot: "rust-agent", memoryMB: 2048 })
-0:05  api/ calls sandbox.agent.start({ prompt: issue context, systemPrompt })
+0:01  GitHub POSTs webhook to api/
+0:01  api/ verifies signature, posts "Working on it..." comment
+0:02  api/ → Sandbox.create({ snapshot: "rust-agent", memoryMB: 2048 })
+0:05  api/ → sandbox.exec.start("node /workspace/agent/dist/index.js --repo ... --issue 42")
 
-      ── Agent running inside sandbox ──
+      ── Agent process running inside sandbox ──
+      ── (query() loop: Claude API ↔ tool calls) ──
 
-0:10  Agent: gh repo clone demo-org/ingest-rs
-0:15  Agent: reads issue #42, investigates codebase
-1:00  Agent: makes the fix (adds processed_at field)
+0:10  Agent: gh issue view 42 → reads issue body
+0:15  Agent: gh repo clone demo-org/ingest-rs
+0:30  Agent: investigates codebase, makes the fix
 1:30  Agent: CARGO_BUILD_JOBS=1 cargo build 2>&1
-3:00  Agent: build killed (exit 137) — OOM at 2 GB
-3:05  Agent: curl -s http://169.254.169.254/v1/limits → {"memLimit": 2048, ...}
+3:00  Build killed (exit 137) — OOM at 2 GB
+3:05  Agent: curl -s http://169.254.169.254/v1/limits → 2048 MB
 3:10  Agent: curl -s -X POST http://169.254.169.254/v1/scale -d '{"memoryMB": 8192}'
 3:15  Agent: CARGO_BUILD_JOBS=1 cargo build 2>&1
-5:00  Agent: build succeeds (at 8 GB)
+5:00  Build succeeds (at 8 GB)
 5:05  Agent: curl -s -X POST http://169.254.169.254/v1/scale -d '{"memoryMB": 2048}'
-5:10  Agent: cargo test 2>&1 → pass
-5:30  Agent: git checkout -b fix/42-add-processed-at
-5:35  Agent: git commit, git push
-5:40  Agent: gh pr create --title "Add processed_at to batch response" --body "Fixes #42"
+5:10  Agent: cargo test → pass
+5:30  Agent: git checkout -b fix/42-add-processed-at, commit, push
+5:40  Agent: gh pr create --title "Add processed_at ..." --body "Fixes #42"
 5:45  Agent: gh issue comment 42 --body "PR submitted: <link>"
 
-      ── Agent exits ──
+      ── Agent process exits (code 0) ──
 
-5:50  api/ receives exit code 0 via session.done
+5:50  api/ sees exit code 0 via session.done
 5:50  api/ kills sandbox
 
 Total session: ~6 min
@@ -547,11 +643,12 @@ Time at 2 GB: ~4 min (everything else)
 
 ```
 demo-elasticity/
-├── AGENTS.md                      # Stable reference
+├── AGENTS.md                      # Stable reference + design decisions
 ├── elasticity.md                  # Scaling API spec (assumed contract)
 ├── .agents-wip/
 │   └── design.md                  # This file
-├── ingest-rs/                     # Rust data ingestion service
+│
+├── ingest-rs/                     # Rust data ingestion service (the target repo)
 │   ├── Cargo.toml
 │   ├── src/
 │   │   ├── main.rs
@@ -562,19 +659,25 @@ demo-elasticity/
 │   │   └── db.rs
 │   └── migrations/
 │       └── 001_events.sql
-├── agent/
-│   └── prompt.md                  # System prompt (read by api/ at runtime)
-└── api/
-    ├── package.json
+│
+├── agent/                         # The agent — standalone Node.js program
+│   ├── package.json               # @anthropic-ai/claude-agent-sdk
+│   ├── tsconfig.json
+│   ├── src/
+│   │   └── index.ts               # Entry: parse args, query(), handle result
+│   └── prompt.md                  # System prompt (loaded by index.ts)
+│
+└── api/                           # Webhook handler + sandbox launcher
+    ├── package.json               # hono, @opencomputer/sdk
     ├── tsconfig.json
     ├── .env.example
     ├── src/
     │   ├── index.ts               # Hono app, server
     │   ├── webhook.ts             # Webhook handler
-    │   ├── sandbox.ts             # OC SDK orchestration
+    │   ├── sandbox.ts             # Sandbox.create() + exec.start()
     │   └── github.ts              # Signature verification, comment posting
     └── scripts/
-        └── create-snapshot.ts     # One-time snapshot builder
+        └── create-snapshot.ts     # One-time: build snapshot
 ```
 
 ---
@@ -585,11 +688,13 @@ demo-elasticity/
 - **OOM detection reliability**: Exit 137 is clear. `rustc` LLVM errors may look different. System prompt covers both patterns but needs testing.
 - **Real repo vs. demo org**: Real public repo is more convincing but needs cleanup between demo runs. Dedicated demo org is safer.
 - **Snapshot durability**: How long do OC snapshots persist? Need to confirm they survive across days/weeks or have a re-creation mechanism.
+- **Agent SDK bundling**: Does `@anthropic-ai/claude-agent-sdk` work correctly when built with `tsc` and run via `node dist/index.js`? Needs verification — it may need tsx or special resolution. Fallback: run `npx tsx src/index.ts` in the snapshot (tsx is a devDep).
 
 ## Resolved
 
-- **Sandbox template**: Declarative snapshot via `Image.base().runCommands(rustup).aptInstall([gh])`. Default base already has build-essential, git, curl, libssl-dev. Snapshot persists org-wide, boots instantly.
-- **Agent config delivery**: System prompt passed via SDK `systemPrompt` parameter, not synced as files. Simpler.
+- **Agent is real code**: Standalone Node.js program using `query()` from `@anthropic-ai/claude-agent-sdk`. Not prompt-only via `sandbox.agent.start()`. Runs locally or in sandbox. See AGENTS.md for reasoning.
+- **Sandbox template**: Declarative snapshot via `Image.base()` with Rust + Node.js + gh + agent code baked in.
+- **Agent deployment**: Agent code baked into snapshot. api/ runs it via `sandbox.exec.start("node ...")`.
 - **Status reporting**: Agent posts its own GitHub comments via `gh` CLI. api/ only posts initial ack and failure fallback.
 - **Framework**: Hono + raw fetch. No @octokit — only 2-3 GitHub API calls needed.
 - **Elasticity API contract**: Per `elasticity.md`. Not yet implemented in OC — demo assumes it ships. See Prerequisites.
