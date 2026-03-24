@@ -21,7 +21,6 @@ if (!values.repo || !values.issue) {
   process.exit(1);
 }
 
-// Use a temp directory so we don't clone repos into the source tree
 const workdir = process.env.AGENT_WORKDIR ?? mkdtempSync(join(tmpdir(), "agent-"));
 console.log(`Working directory: ${workdir}`);
 
@@ -53,18 +52,30 @@ for await (const message of stream) {
   if (message.type === "assistant" && message.message?.content) {
     for (const block of message.message.content as any[]) {
       if (block.type === "text" && block.text) {
-        console.log(`\n[agent] ${block.text.slice(0, 300)}`);
+        // Show agent thinking — keep it short for demo
+        const text = block.text.trim();
+        if (text) console.log(`\n  ${text.slice(0, 300)}`);
       } else if (block.type === "tool_use") {
-        const input = block.input ? JSON.stringify(block.input).slice(0, 200) : "";
-        console.log(`\n[tool] ${block.name}(${input})`);
+        // Show tool calls — highlight bash commands for demo visibility
+        if (block.name === "Bash") {
+          const cmd = block.input?.command ?? "";
+          console.log(`\n  $ ${cmd}`);
+        } else if (block.name === "Edit") {
+          const file = block.input?.file_path ?? "";
+          console.log(`\n  [edit] ${file.split("/").pop()}`);
+        }
+        // Skip Read/Glob/Grep — noise for demo
       }
     }
   }
 
   if (message.type === "result") {
     if (message.subtype === "success") {
-      console.log("\nAgent completed successfully.");
-      console.log(`Duration: ${(message as any).duration_ms}ms, Cost: $${(message as any).total_cost_usd}`);
+      const dur = Math.round((message as any).duration_ms / 1000);
+      const cost = (message as any).total_cost_usd?.toFixed(2);
+      console.log(`\n====================================`);
+      console.log(`  DONE — ${dur}s, $${cost}`);
+      console.log(`====================================\n`);
     } else {
       const errors = "errors" in message ? (message as any).errors : [];
       console.error("\nAgent failed:", message.subtype, errors);
