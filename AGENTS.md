@@ -19,15 +19,15 @@ Memory profile (clean build, `CARGO_BUILD_JOBS=1`):
 
 ### 2. `agent/` — Issue-Resolver Agent (Claude Agent SDK)
 
-Runs inside an OpenComputer sandbox. Picks up GitHub issues, clones the repo, investigates, makes a fix, builds, tests, and submits a PR.
+A standalone Node.js application using `@anthropic-ai/claude-agent-sdk`. Clones a repo, resolves a GitHub issue, builds, tests, and opens a PR. Can run locally or inside an OpenComputer sandbox — the sandbox is just compute, the agent is a real program.
 
-The agent knows how to use the elasticity API via its system prompt: when a build fails with OOM (exit 137, "killed", LLVM allocation errors), it checks current limits at `http://169.254.169.254/v1/limits`, scales up via `POST /v1/scale`, retries the build, then scales back down.
+The agent uses the elasticity API from inside the sandbox: when a build OOMs, it detects the failure (exit 137, LLVM allocation errors), queries current limits, scales up via the metadata service, retries, and scales back down.
+
+**Why real code, not prompt-only**: OpenComputer's `sandbox.agent.start()` accepts a system prompt and runs a managed agent loop inside the VM. We deliberately don't use that here. The demo should show the pattern real users follow: build an agent as code using the SDK, then deploy it to infrastructure. Baking the agent framework into the deployment platform and having users ship prompts instead of applications conflates two concerns — it's like if a PaaS required you to use its built-in web framework instead of bringing your own. The agent should be a portable program that happens to run in a sandbox.
 
 ### 3. `api/` — Event Handler / Orchestration
 
-Receives GitHub webhooks (`issue_comment.created`), filters for `@myagent` mentions, creates an OpenComputer sandbox (starting at 2 GB — deliberately undersized for compilation), and starts the agent with the issue context. Posts status updates back to the issue thread.
-
-This is the "agent app" layer. Patterns that emerge here may later be extracted as experimental OpenComputer APIs.
+Receives GitHub webhooks (`issue_comment.created`), filters for `@myagent` mentions, creates an OpenComputer sandbox (starting at 2 GB — deliberately undersized for compilation), deploys the agent code into it, and runs it. Posts status updates back to the issue thread.
 
 ## Elasticity API
 
