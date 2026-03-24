@@ -464,9 +464,9 @@ impl Normalizable for CustomJsonEvent {
                 p if p >= 3 => "medium".into(),
                 _ => "low".into(),
             },
+            raw_payload: serde_json::to_value(&self).unwrap_or_default(),
             correlation_id: self.correlation_id.unwrap_or_else(|| format!("custom-{}", self.id)),
             processed_at: Utc::now(),
-            raw_payload: serde_json::to_value(&self).unwrap_or_default(),
             version: "1.0".into(),
         })
     }

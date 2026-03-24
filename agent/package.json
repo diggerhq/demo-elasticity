@@ -10,7 +10,8 @@
     "@anthropic-ai/claude-agent-sdk": "^0.2.71"
   },
   "devDependencies": {
-    "@opencomputer/sdk": "^0.4",
+    "@opencomputer/sdk": "file:../../opencomputer/sdks/typescript",
+    "@types/node": "^25.5.0",
     "tsx": "^4",
     "typescript": "^5"
   }

@@ -57,7 +57,8 @@ for await (const message of stream) {
     if (message.subtype === "success") {
       console.log("Agent completed successfully.");
     } else {
-      console.error("Agent failed:", message.result ?? "unknown error");
+      const errors = "errors" in message ? (message as any).errors : [];
+      console.error("Agent failed:", message.subtype, errors);
       exitCode = 1;
     }
   }
