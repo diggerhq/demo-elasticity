@@ -400,11 +400,12 @@ GET /health
 ```bash
 OPENCOMPUTER_API_KEY=       # OC API key for sandbox creation
 OPENCOMPUTER_API_URL=       # OC API endpoint
-GITHUB_TOKEN=               # PAT with repo scope — for posting comments + passed to sandbox
+GITHUB_TOKEN=               # PAT with repo scope — for posting comments from api/ itself
 GITHUB_WEBHOOK_SECRET=      # Shared secret for webhook HMAC verification
-ANTHROPIC_API_KEY=          # Passed through to sandbox for Claude agent
 PORT=3000                   # Server port (default 3000)
 ```
+
+Note: `ANTHROPIC_API_KEY` and the sandbox's `GITHUB_TOKEN` are **not** in api/'s env. They live in the OC SecretStore and are injected into the sandbox automatically. api/ only needs its own `GITHUB_TOKEN` for posting the initial "Working on it..." comment.
 
 ### Webhook Handler (`webhook.ts`)
 
@@ -483,15 +484,14 @@ interface RunContext {
 }
 
 export async function runAgent(ctx: RunContext): Promise<void> {
-  // 1. Create sandbox — everything is in the snapshot
+  // 1. Create sandbox — code is in snapshot, secrets come from SecretStore
   const sandbox = await Sandbox.create({
     snapshot: "rust-agent",
+    secretStore: "rust-agent",
     timeout: 1800,
     memoryMB: 2048,
     envs: {
-      GITHUB_TOKEN: process.env.GITHUB_TOKEN!,
-      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY!,
-      CARGO_BUILD_JOBS: "1",
+      CARGO_BUILD_JOBS: "1",  // non-secret config only
     },
   });
 
@@ -530,7 +530,7 @@ export async function runAgent(ctx: RunContext): Promise<void> {
 }
 ```
 
-api/ knows three things about the agent: the snapshot name, the entry point path, and the CLI args. That's it.
+api/ knows four things about the agent: the snapshot name, the secret store name, the entry point path, and the CLI args. That's it. No secret values, no agent source files.
 
 ### Concurrency
 
@@ -577,18 +577,44 @@ npm install
 ANTHROPIC_API_KEY=... GITHUB_TOKEN=... npx tsx src/index.ts --repo owner/repo --issue 42
 ```
 
-### 2. Deploy Agent Snapshot
+### 2. Create SecretStore (once)
+
+Set up the OC SecretStore that holds secrets for the agent sandbox. This is infrastructure — do it once, update when keys rotate.
+
+```typescript
+import { SecretStore } from "@opencomputer/sdk";
+
+const opts = { apiKey: "...", apiUrl: "..." };
+
+const store = await SecretStore.create({ name: "rust-agent", ...opts });
+
+await SecretStore.setSecret(store.id, "ANTHROPIC_API_KEY", "sk-ant-...", {
+  allowedHosts: ["api.anthropic.com"],
+  ...opts,
+});
+
+await SecretStore.setSecret(store.id, "GITHUB_TOKEN", "ghp_...", {
+  allowedHosts: ["github.com", "api.github.com"],
+  ...opts,
+});
+```
+
+Or via a small script in `scripts/setup-secrets.ts` — run once, not on every deploy.
+
+Secrets are injected as env vars into any sandbox created with `secretStore: "rust-agent"`. The `allowedHosts` field provides egress control — the sandbox can only use `ANTHROPIC_API_KEY` to talk to `api.anthropic.com`.
+
+### 3. Deploy Agent Snapshot
 
 ```bash
 cd agent
 OPENCOMPUTER_API_KEY=... OPENCOMPUTER_API_URL=... npx tsx scripts/deploy.ts
 ```
 
-### 3. Push ingest-rs
+### 4. Push ingest-rs
 
 Push `ingest-rs/` to a GitHub repo (e.g. `demo-org/ingest-rs`). Create the demo issue: "Batch endpoint response is missing `processed_at` timestamp". Leave it open.
 
-### 4. Configure GitHub Webhook
+### 5. Configure GitHub Webhook
 
 On the repo, add a webhook:
 - URL: `https://<api-host>/webhooks/github`
@@ -596,7 +622,7 @@ On the repo, add a webhook:
 - Secret: same as `GITHUB_WEBHOOK_SECRET`
 - Events: "Issue comments" only
 
-### 5. Run the API
+### 6. Run the API
 
 ```bash
 cd api
