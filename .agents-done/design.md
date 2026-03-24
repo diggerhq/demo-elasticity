@@ -604,8 +604,6 @@ demo-elasticity/
 
 ## Open Questions
 
-- **Calibration**: Need to empirically verify the memory profile by building `ingest-rs` under constrained memory (2 GB sandbox). Number of source event structs is the tuning lever. The current ~20 structs may not be enough — hasn't been tested under memory constraint yet.
-- **OOM detection reliability**: Exit 137 is clear. `rustc` LLVM errors may look different. System prompt covers both patterns but needs testing under actual OOM conditions.
 - **Declarative snapshots**: `Snapshots.create()` with `Image` definitions times out through Cloudflare. Either OC needs to stream build logs faster (keep Cloudflare alive) or we keep using the manual checkpoint approach.
 - **SecretStore migration**: Currently passing secrets as env vars. Should move to OC SecretStore for egress control, but works for demo.
 
@@ -616,9 +614,12 @@ demo-elasticity/
 - **Agent owns deployment**: `deploy-manual.ts` builds the checkpoint. api/ references a checkpoint ID.
 - **Status reporting**: Agent posts its own GitHub comments via `gh` CLI. api/ only posts initial ack and failure fallback.
 - **Framework**: Hono + @octokit/rest + @octokit/webhooks for GitHub interaction.
-- **Elasticity API contract**: Per `elasticity.md`. Not yet implemented in OC — demo assumes it ships.
+- **Elasticity API**: Deployed and working on `feat/qemu-backend-azure` branch at `app.opencomputer.dev`.
 - **Permission mode**: `acceptEdits` not `bypassPermissions` — sandbox runs as root, Claude Code CLI rejects `--allow-dangerously-skip-permissions` as root.
 - **Rust install path**: `/workspace/.rustup` + `/workspace/.cargo` — rootfs is only 1.7 GB, data disk (`/workspace`) has 20 GB.
 - **Base image**: Already has Node.js 20, build-essential, git, curl. Need to add: Rust, gh CLI, Claude Code CLI.
 - **Checkpoint-based deploy**: Manual approach (create sandbox → run steps → checkpoint) works around Cloudflare timeout on declarative snapshots.
-- **E2E verified**: Full webhook → sandbox → agent → scale → build → PR flow working. ~2 min, $0.27. Tested via GitHub webhook (ngrok) + local api/ server. PR #3 on diggerhq/demo-elasticity.
+- **E2E verified**: Full webhook → sandbox → agent → scale up → build → scale down → test → PR flow working. Demo recorded. Tested via GitHub webhook (ngrok) + local api/ server.
+- **Demo flow**: Agent checks memory → scales to 8 GB → builds → scales down → tests → opens PR. No OOM-and-retry (agent gets killed along with cargo). Instead agent proactively scales before building.
+- **Heavy deps for compile time**: Added `reqwest` with full features. `aws-sdk-s3` was too heavy (OOMs even at 4 GB). The current setup builds in ~2 min at 8 GB.
+- **maxTurns**: Set to 200 (50 was not enough for the full clone→fix→build→test→PR flow).
