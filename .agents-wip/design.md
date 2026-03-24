@@ -12,12 +12,6 @@
 
 **Memory cap**: OpenComputer currently enforces a 2048 MB ceiling on `Sandbox.create()`. This needs to be raised (or bypassed for this org) so the sandbox can scale to 8192 MB at runtime.
 
-**Snapshot SDK imports**: `Image` and `Snapshots` are Node.js-only exports:
-```typescript
-import { Image } from "@opencomputer/sdk/dist/image.js";
-import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
-```
-
 ---
 
 ## Architecture
@@ -230,7 +224,7 @@ const stream = query({
     `Start by running: gh issue view ${values.issue} --repo ${values.repo}`,
   ].join("\n"),
   options: {
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-4-6",
     systemPrompt,
     tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
     allowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
@@ -318,7 +312,6 @@ No conditional logic. The agent doesn't know or care where it's running.
 The agent owns its own packaging. `deploy.ts` builds a snapshot that includes the full runtime environment (Rust, Node.js, gh) and the agent code. api/ references this snapshot by name — it never touches agent files.
 
 ```typescript
-import { readFileSync } from "node:fs";
 import { Image } from "@opencomputer/sdk/dist/image.js";
 import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
 
@@ -637,7 +630,7 @@ Time  What
 0:00  User comments "@myagent resolve this" on issue #42
 0:01  GitHub POSTs webhook to api/
 0:01  api/ verifies signature, posts "Working on it..." comment
-0:02  api/ → Sandbox.create({ snapshot: "rust-agent", memoryMB: 2048 })
+0:02  api/ → Sandbox.create({ snapshot: "rust-agent", secretStore: "rust-agent", memoryMB: 2048 })
 0:03  api/ → sandbox.exec.start("node /workspace/agent/dist/index.js --repo ... --issue 42")
 
       ── Agent process running inside sandbox ──
@@ -718,8 +711,7 @@ demo-elasticity/
 - **Calibration**: Need to empirically verify the memory profile by building `ingest-rs` under constrained memory. Number of source event structs is the tuning lever.
 - **OOM detection reliability**: Exit 137 is clear. `rustc` LLVM errors may look different. System prompt covers both patterns but needs testing.
 - **Real repo vs. demo org**: Real public repo is more convincing but needs cleanup between demo runs. Dedicated demo org is safer.
-- **Snapshot durability**: How long do OC snapshots persist? Need to confirm they survive across days/weeks or have a re-creation mechanism.
-- **Snapshot overwrite semantics**: Does `snapshots.create()` with an existing name overwrite, or do we need delete+create? Current deploy script does delete+create to be safe. If OC adds tag/version support, we can use that instead.
+- **Snapshot lifecycle**: How long do OC snapshots persist? Does `snapshots.create()` with an existing name overwrite, or do we need delete+create? Current deploy script does delete+create to be safe. If OC adds tag/version support, we can use that instead.
 
 ## Resolved
 
