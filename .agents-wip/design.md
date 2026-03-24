@@ -567,19 +567,13 @@ Any change to agent source, prompt, or deps. Run `cd agent && npx tsx scripts/de
 
 ---
 
-## Setup & Bootstrap
+## Setup & Operations
 
-### 1. Build & Test Agent Locally
+### Bootstrap (once)
 
-```bash
-cd agent
-npm install
-ANTHROPIC_API_KEY=... GITHUB_TOKEN=... npx tsx src/index.ts --repo owner/repo --issue 42
-```
+Infrastructure that exists before anything runs. Do these once, update when keys rotate or infra changes.
 
-### 2. Create SecretStore (once)
-
-Set up the OC SecretStore that holds secrets for the agent sandbox. This is infrastructure — do it once, update when keys rotate.
+**OC SecretStore** — holds secrets for the agent sandbox:
 
 ```typescript
 import { SecretStore } from "@opencomputer/sdk";
@@ -599,39 +593,38 @@ await SecretStore.setSecret(store.id, "GITHUB_TOKEN", "ghp_...", {
 });
 ```
 
-Or via a small script in `scripts/setup-secrets.ts` — run once, not on every deploy.
+Can be a small script (`scripts/setup-secrets.ts`) or done via OC dashboard if one exists. Secrets are injected as env vars into any sandbox created with `secretStore: "rust-agent"`. The `allowedHosts` field provides egress control.
 
-Secrets are injected as env vars into any sandbox created with `secretStore: "rust-agent"`. The `allowedHosts` field provides egress control — the sandbox can only use `ANTHROPIC_API_KEY` to talk to `api.anthropic.com`.
-
-### 3. Deploy Agent Snapshot
+### Deploy (on agent code change)
 
 ```bash
 cd agent
-OPENCOMPUTER_API_KEY=... OPENCOMPUTER_API_URL=... npx tsx scripts/deploy.ts
+npm install                  # if deps changed
+npm run build                # tsc → dist/
+npx tsx scripts/deploy.ts    # rebuilds snapshot "rust-agent"
 ```
 
-### 4. Push ingest-rs
+This is the only repeatable step. Agent code change → redeploy snapshot → next sandbox picks it up.
 
-Push `ingest-rs/` to a GitHub repo (e.g. `demo-org/ingest-rs`). Create the demo issue: "Batch endpoint response is missing `processed_at` timestamp". Leave it open.
-
-### 5. Configure GitHub Webhook
-
-On the repo, add a webhook:
-- URL: `https://<api-host>/webhooks/github`
-- Content type: `application/json`
-- Secret: same as `GITHUB_WEBHOOK_SECRET`
-- Events: "Issue comments" only
-
-### 6. Run the API
+### Run
 
 ```bash
 cd api
-cp .env.example .env   # fill in values
+cp .env.example .env   # OPENCOMPUTER_API_KEY, GITHUB_TOKEN (api/'s own), GITHUB_WEBHOOK_SECRET
 npm install
 npm run dev             # starts on :3000
 ```
 
-Then comment `@myagent resolve this` on the demo issue.
+### Verify Locally (optional)
+
+The agent can run outside a sandbox for testing:
+
+```bash
+cd agent
+ANTHROPIC_API_KEY=... GITHUB_TOKEN=... npx tsx src/index.ts --repo owner/repo --issue 42
+```
+
+Elasticity `curl` commands will 404 (no metadata service) but the build will work if your machine has enough RAM.
 
 ---
 
