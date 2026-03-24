@@ -625,16 +625,72 @@ npm install
 npm run dev             # starts on :3000
 ```
 
-### Verify Locally (optional)
+### Testing
 
-The agent can run outside a sandbox for testing:
+Three levels, from inner to outer. You can test each independently.
+
+#### 1. Agent locally (no sandbox, no OC)
+
+Run the agent on your machine against a real GitHub repo + issue:
 
 ```bash
 cd agent
-ANTHROPIC_API_KEY=... GITHUB_TOKEN=... npx tsx src/index.ts --repo owner/repo --issue 42
+ANTHROPIC_API_KEY=... GITHUB_TOKEN=... npx tsx src/index.ts --repo demo-org/ingest-rs --issue 1
 ```
 
-Elasticity `curl` commands will 404 (no metadata service) but the build will work if your machine has enough RAM.
+The agent will clone, investigate, fix, build, test, and PR — same as in a sandbox. Elasticity `curl` commands will 404 (no metadata service) but that's fine — your machine has enough RAM so the build won't OOM. This tests agent logic, prompt quality, and the full workflow without any OC dependency.
+
+#### 2. Agent in sandbox (no webhook, no elasticity)
+
+Test the sandbox deployment path without waiting for the elasticity API. Use a small script (`api/scripts/test-sandbox.ts`) that calls `runAgent()` directly:
+
+```typescript
+import { runAgent } from "../src/sandbox";
+
+await runAgent({
+  repo: "demo-org/ingest-rs",
+  issueNumber: 1,
+});
+```
+
+```bash
+cd api
+npx tsx scripts/test-sandbox.ts
+```
+
+This creates a real sandbox from the snapshot, runs the agent inside it, and streams output. Skips the webhook path entirely. To test without the elasticity API, temporarily start the sandbox at 8 GB (`memoryMB: 8192` in the test script) so the build succeeds without scaling — verifies the full sandbox → agent → GitHub flow.
+
+#### 3. End-to-end with webhook
+
+Start api/, expose it via ngrok, configure the webhook on the demo repo, and comment `@myagent resolve this` on the issue. This is the full demo flow.
+
+```bash
+# Terminal 1
+cd api && npm run dev
+
+# Terminal 2
+ngrok http 3000
+# → copy the https URL, set it as the webhook URL on the GitHub repo
+```
+
+#### What you can test before the elasticity API ships
+
+Everything except the actual scaling. Levels 1 and 2 work today. For level 2, start at 8 GB to skip the OOM/scale-up cycle. Once the elasticity API lands, switch back to 2 GB and test the full OOM → scale → retry → scale-down sequence.
+
+#### Calibrating ingest-rs memory profile
+
+Once ingest-rs is built, verify it actually OOMs at 2 GB. Use level 2 (sandbox) with different `memoryMB` values:
+
+```typescript
+// In test-sandbox.ts, try different sizes:
+const sandbox = await Sandbox.create({ snapshot: "rust-agent", memoryMB: 2048, ... });
+// → agent should hit OOM on cargo build
+
+const sandbox = await Sandbox.create({ snapshot: "rust-agent", memoryMB: 8192, ... });
+// → agent should succeed
+```
+
+If 2 GB doesn't OOM, add more event source structs to ingest-rs (the tuning lever). If 8 GB isn't enough, reduce the struct count or allow more parallelism.
 
 ---
 
