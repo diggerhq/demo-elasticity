@@ -40,7 +40,7 @@ import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
 ```
 
 **Data flow**:
-1. `api/` receives GitHub webhook, creates sandbox, syncs agent source, runs it as a process
+1. `api/` receives GitHub webhook, creates sandbox, runs agent as a process
 2. Agent (real Node.js program using Claude Agent SDK) works autonomously — clone, fix, build, test, PR
 3. Agent hits OOM → calls metadata service to scale up → retries → scales down
 4. Agent posts status to GitHub via `gh` CLI (not through api/)
@@ -86,7 +86,7 @@ Each layer is generic over the event type with `Serialize + Deserialize` bounds.
 - `tracing` — structured logging
 - `chrono` — timestamps in event structs
 
-No database dependency. No sqlx, no migrations, no connection pool.
+No database dependency.
 
 ### Structure
 
@@ -141,7 +141,7 @@ cd agent
 ANTHROPIC_API_KEY=... GITHUB_TOKEN=... npx tsx src/index.ts --repo owner/repo --issue 42
 ```
 
-Or inside an OpenComputer sandbox (source synced by api/, deps pre-installed in snapshot).
+Or inside an OpenComputer sandbox (deployed as a snapshot via `scripts/deploy.ts`).
 
 ### Dependencies
 
@@ -151,13 +151,35 @@ Or inside an OpenComputer sandbox (source synced by api/, deps pre-installed in 
     "@anthropic-ai/claude-agent-sdk": "^0.2.71"
   },
   "devDependencies": {
+    "@opencomputer/sdk": "^0.4",
     "tsx": "^4",
     "typescript": "^5"
   }
 }
 ```
 
-Single meaningful dependency. The SDK handles tool execution (bash, file ops), Claude API calls, and the agentic loop.
+One runtime dependency (the agent SDK). `@opencomputer/sdk` is a devDep — only used by the deploy script, not shipped into the snapshot.
+
+### Environment Variables
+
+**Runtime** (inside sandbox, from SecretStore):
+```bash
+ANTHROPIC_API_KEY=           # Claude API — injected by SecretStore
+GITHUB_TOKEN=                # gh CLI auth — injected by SecretStore
+```
+
+**Deploy script** (local):
+```bash
+OPENCOMPUTER_API_KEY=        # OC API key for snapshot creation
+OPENCOMPUTER_API_URL=        # OC API endpoint
+```
+
+**Local testing** (`.env` or shell):
+```bash
+ANTHROPIC_API_KEY=           # Claude API
+GITHUB_TOKEN=                # gh CLI auth
+AGENT_WORKDIR=/tmp/workspace # optional, defaults to cwd
+```
 
 ### Structure
 
@@ -214,7 +236,7 @@ const stream = query({
     allowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
-    cwd: "/workspace",
+    cwd: process.env.AGENT_WORKDIR ?? process.cwd(),
     maxTurns: 50,
   },
 });
@@ -287,11 +309,9 @@ recompilation so they need much less memory.
 
 ### Running Locally vs. In Sandbox
 
-The same code runs in both environments. The only differences are:
-- **Locally**: `cwd` would be wherever you want to clone into. The elasticity `curl` commands will 404 (no metadata service), but the build will just work if your machine has enough RAM.
-- **In sandbox**: `cwd` is `/workspace`. Elasticity API is available. `GITHUB_TOKEN` is injected by the sandbox env.
+The same code runs in both environments. `cwd` defaults to `process.cwd()` locally, or can be set via `AGENT_WORKDIR` env var (the snapshot sets this to `/workspace`). The elasticity `curl` commands will 404 locally (no metadata service) but the build will just work if your machine has enough RAM.
 
-No code changes, no conditional logic. The agent doesn't know or care where it's running.
+No conditional logic. The agent doesn't know or care where it's running.
 
 ### Deployment (`scripts/deploy.ts`)
 
@@ -319,13 +339,18 @@ const image = Image.base()
   )
   // gh CLI
   .aptInstall(["gh"])
-  // Agent code + deps
-  .addLocalDir(".", "/workspace/agent")
-  .runCommands("cd /workspace/agent && npm install && npm run build")
+  // Agent source (explicit files — avoids shipping local node_modules)
+  .addLocalFile("package.json", "/workspace/agent/package.json")
+  .addLocalFile("package-lock.json", "/workspace/agent/package-lock.json")
+  .addLocalFile("tsconfig.json", "/workspace/agent/tsconfig.json")
+  .addLocalFile("prompt.md", "/workspace/agent/prompt.md")
+  .addLocalFile("src/index.ts", "/workspace/agent/src/index.ts")
+  .runCommands("cd /workspace/agent && npm ci && npm run build")
   // Environment
   .env({
     PATH: "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     RUST_BACKTRACE: "1",
+    AGENT_WORKDIR: "/workspace",
   })
   .workdir("/workspace");
 
@@ -349,7 +374,17 @@ cd agent
 OPENCOMPUTER_API_KEY=... OPENCOMPUTER_API_URL=... npx tsx scripts/deploy.ts
 ```
 
-Recreating with the same name means api/ always gets the latest agent code without any config change. The `Sandbox.create({ snapshot: "rust-agent" })` call resolves by name.
+**Snapshot contents** (`rust-agent`):
+
+| Layer | What |
+|-------|------|
+| OC base image | Ubuntu, build-essential, git, curl, libssl-dev, pkg-config, python3 |
+| Rust | `rustup` + stable toolchain |
+| Node.js 22 | Via nodesource |
+| gh CLI | Via apt |
+| Agent | `/workspace/agent/` — source, node_modules, built dist |
+
+**Name resolution**: `Sandbox.create({ snapshot: "rust-agent" })` resolves by name. Deploy script deletes and recreates with the same name — api/ always gets the latest without config change.
 
 **When to redeploy**: Any change to agent source, prompt, or deps. This is the agent's CI/CD step — equivalent to `docker build && docker push`.
 
@@ -364,10 +399,8 @@ Thin webhook handler + sandbox launcher. Receives a GitHub webhook, creates a sa
 - `hono` — HTTP framework
 - `@opencomputer/sdk` — sandbox creation + exec
 - `@hono/node-server` — run Hono on Node.js
-- Node.js `crypto` — HMAC-SHA256 webhook signature verification
-- `fetch` (built-in) — GitHub API calls for posting comments
-
-No @octokit — we only make 2-3 GitHub API calls, raw `fetch` is simpler.
+- `@octokit/webhooks` — GitHub webhook signature verification
+- `@octokit/rest` — GitHub API (post comments)
 
 ### Structure
 
@@ -405,13 +438,13 @@ GITHUB_WEBHOOK_SECRET=      # Shared secret for webhook HMAC verification
 PORT=3000                   # Server port (default 3000)
 ```
 
-Note: `ANTHROPIC_API_KEY` and the sandbox's `GITHUB_TOKEN` are **not** in api/'s env. They live in the OC SecretStore and are injected into the sandbox automatically. api/ only needs its own `GITHUB_TOKEN` for posting the initial "Working on it..." comment.
+`ANTHROPIC_API_KEY` and the sandbox's `GITHUB_TOKEN` are **not** here — they live in the OC SecretStore and are injected into the sandbox automatically. api/ only needs its own `GITHUB_TOKEN` for posting comments on behalf of the webhook handler.
 
 ### Webhook Handler (`webhook.ts`)
 
 ```typescript
 import { Hono } from "hono";
-import { verifySignature, postComment } from "./github";
+import { webhooks, postComment } from "./github";
 import { runAgent } from "./sandbox";
 
 const TRIGGER = "@myagent";
@@ -421,7 +454,8 @@ export const webhook = new Hono();
 webhook.post("/webhooks/github", async (c) => {
   const body = await c.req.text();
   const sig = c.req.header("x-hub-signature-256") ?? "";
-  if (!verifySignature(body, sig)) return c.text("bad signature", 401);
+
+  if (!(await webhooks.verify(body, sig))) return c.text("bad signature", 401);
 
   const event = c.req.header("x-github-event");
   if (event !== "issue_comment") return c.text("ignored", 200);
@@ -449,24 +483,16 @@ webhook.post("/webhooks/github", async (c) => {
 ### GitHub Helpers (`github.ts`)
 
 ```typescript
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { Webhooks } from "@octokit/webhooks";
+import { Octokit } from "@octokit/rest";
 
-export function verifySignature(payload: string, signature: string): boolean {
-  const expected = "sha256=" + createHmac("sha256", process.env.GITHUB_WEBHOOK_SECRET!)
-    .update(payload).digest("hex");
-  if (expected.length !== signature.length) return false;
-  return timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
-}
+export const webhooks = new Webhooks({ secret: process.env.GITHUB_WEBHOOK_SECRET! });
+
+export const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 
 export async function postComment(repo: string, issue: number, body: string): Promise<void> {
-  await fetch(`https://api.github.com/repos/${repo}/issues/${issue}/comments`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ body }),
-  });
+  const [owner, name] = repo.split("/");
+  await octokit.issues.createComment({ owner, repo: name, issue_number: issue, body });
 }
 ```
 
@@ -543,30 +569,6 @@ For the demo, one agent at a time is fine. Each webhook spawns an independent sa
 
 ---
 
-## Snapshot: `rust-agent`
-
-Owned and built by `agent/scripts/deploy.ts` (see Component 2 → Deployment). Contains the full runtime: system tooling, agent code, and agent dependencies. api/ references it by name.
-
-| Layer | What |
-|-------|------|
-| OC base image | Ubuntu, build-essential, git, curl, libssl-dev, pkg-config, python3 |
-| Rust | `rustup` + stable toolchain |
-| Node.js 22 | Via nodesource |
-| gh CLI | Via apt |
-| Agent | `/workspace/agent/` — full source, node_modules, built dist |
-
-### Snapshot Name Resolution
-
-`Sandbox.create({ snapshot: "rust-agent" })` resolves by name. The deploy script deletes and recreates with the same name on each deploy. api/ always gets the latest version without any config change.
-
-If OC supports snapshot tags or versioned names in future, we can use those instead of delete+create. For now, name-based resolution is sufficient.
-
-### When to Redeploy
-
-Any change to agent source, prompt, or deps. Run `cd agent && npx tsx scripts/deploy.ts`. This is the agent's equivalent of `docker build && docker push`.
-
----
-
 ## Setup & Operations
 
 ### Bootstrap (once)
@@ -599,12 +601,11 @@ Can be a small script (`scripts/setup-secrets.ts`) or done via OC dashboard if o
 
 ```bash
 cd agent
-npm install                  # if deps changed
-npm run build                # tsc → dist/
+npm install                  # only needed once locally (for tsx + @opencomputer/sdk)
 npx tsx scripts/deploy.ts    # rebuilds snapshot "rust-agent"
 ```
 
-This is the only repeatable step. Agent code change → redeploy snapshot → next sandbox picks it up.
+The deploy script uploads source files and runs `npm ci && npm run build` inside the snapshot — the build happens there, not locally. Agent code change → redeploy snapshot → next sandbox picks it up.
 
 ### Run
 
@@ -683,7 +684,7 @@ demo-elasticity/
 │   ├── src/
 │   │   ├── main.rs
 │   │   ├── sources/{github,stripe,custom,csv}.rs
-│   │   ├── pipeline/{parse,validate,normalize,enrich,batch,persist}.rs
+│   │   ├── pipeline/{parse,validate,normalize,enrich,batch,emit}.rs
 │   │   ├── unified.rs
 │   │   └── handlers.rs
 │   ├── tests/
@@ -726,5 +727,5 @@ demo-elasticity/
 - **No database in ingest-rs**: Pipeline writes JSON to stdout/response. No sqlx, no Postgres, no migrations. Monomorphization pressure comes from the generic pipeline across ~20 event types, not from DB code.
 - **Agent owns deployment**: `agent/scripts/deploy.ts` builds the snapshot. api/ just references `snapshot: "rust-agent"`. Clean separation — api/ has zero knowledge of agent internals.
 - **Status reporting**: Agent posts its own GitHub comments via `gh` CLI. api/ only posts initial ack and failure fallback.
-- **Framework**: Hono + raw fetch. No @octokit — only 2-3 GitHub API calls needed.
+- **Framework**: Hono + @octokit/rest + @octokit/webhooks for GitHub interaction.
 - **Elasticity API contract**: Per `elasticity.md`. Not yet implemented in OC — demo assumes it ships. See Prerequisites.
