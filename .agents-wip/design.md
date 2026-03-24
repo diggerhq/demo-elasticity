@@ -2,13 +2,14 @@
 
 ## Prerequisites & Assumptions
 
-**Elasticity API**: The internal scaling API (metadata service at `169.254.169.254`) is described in `elasticity.md` but **not yet implemented** in OpenComputer. This demo assumes it will ship per that spec. Specifically:
-- `POST /v1/scale` — live memory resize from inside the sandbox
-- `GET /v1/limits` — query current resource limits
-- CPU auto-scales with memory (1 vCPU per 1 GB)
-- No reboot on resize
+**Elasticity API**: Implemented and deployed on the `feat/qemu-backend-azure` branch of OpenComputer (the branch running at `app.opencomputer.dev`). Verified working:
+- `POST /v1/scale` — live memory resize from inside the sandbox (**tested: 896→1920 MB**)
+- `GET /v1/limits` — returns memLimit, memUsage, cpuPercent, pids, network stats
+- `GET /v1/status` — returns sandboxId, uptime
+- `GET /v1/metadata` — returns region, template
+- CPU auto-scales with memory (1 vCPU per 4 GB based on source code)
 
-**External scaling API** (`PUT /api/sandboxes/:id/limits`) is also not yet implemented. The demo doesn't use it directly — the agent scales itself via the internal API — but it may be useful for monitoring/override.
+**External scaling API**: `POST /api/sandboxes/:id/scale` with `{"memoryMB": N}` — also deployed and working.
 
 **Memory cap**: OpenComputer currently enforces a 2048 MB ceiling on `Sandbox.create()`. This needs to be raised (or bypassed for this org) so the sandbox can scale to 8192 MB at runtime.
 

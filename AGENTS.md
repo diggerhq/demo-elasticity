@@ -31,7 +31,7 @@ Receives GitHub webhooks (`issue_comment.created`), filters for `@myagent` menti
 
 ## Elasticity API
 
-The elasticity API is **not yet implemented** in OpenComputer. `elasticity.md` in this repo describes the assumed contract — both the internal metadata service (`169.254.169.254/v1/scale`) and the external control plane endpoint (`PUT /api/sandboxes/:id/limits`). The demo is built against that spec. If the API ships differently, only the agent prompt and `elasticity.md` need updating.
+The elasticity API is **implemented and deployed** on the `feat/qemu-backend-azure` branch of OpenComputer (the branch running at `app.opencomputer.dev`). Both the internal metadata service (`169.254.169.254/v1/scale`) and the external endpoint (`POST /api/sandboxes/:id/scale`) are working. `elasticity.md` in this repo documents the full API surface.
 
 Two surfaces — external (control plane) and internal (from inside the VM via instance metadata).
 
