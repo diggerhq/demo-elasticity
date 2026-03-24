@@ -621,4 +621,4 @@ demo-elasticity/
 - **Rust install path**: `/workspace/.rustup` + `/workspace/.cargo` — rootfs is only 1.7 GB, data disk (`/workspace`) has 20 GB.
 - **Base image**: Already has Node.js 20, build-essential, git, curl. Need to add: Rust, gh CLI, Claude Code CLI.
 - **Checkpoint-based deploy**: Manual approach (create sandbox → run steps → checkpoint) works around Cloudflare timeout on declarative snapshots.
-- **E2E verified**: Agent completed successfully in sandbox — ~3 min, $0.46 cost. Created PR #2 on diggerhq/demo-elasticity.
+- **E2E verified**: Full webhook → sandbox → agent → scale → build → PR flow working. ~2 min, $0.27. Tested via GitHub webhook (ngrok) + local api/ server. PR #3 on diggerhq/demo-elasticity.

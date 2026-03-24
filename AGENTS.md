@@ -27,7 +27,7 @@ The agent uses the elasticity API from inside the sandbox: when a build OOMs, it
 
 ### 3. `api/` — Event Handler / Orchestration
 
-Receives GitHub webhooks (`issue_comment.created`), filters for `@myagent` mentions, creates an OpenComputer sandbox from the agent's pre-built snapshot (starting at 2 GB — deliberately undersized for compilation), and runs the agent. Posts status updates back to the issue thread. Has zero knowledge of agent internals — just a snapshot name, secret store name, entry point path, and CLI args.
+Receives GitHub webhooks (`issue_comment.created`), filters for `@myagent` mentions, creates an OpenComputer sandbox from the agent's pre-built snapshot (starting at 2 GB — deliberately undersized for compilation), and runs the agent. Posts status updates back to the issue thread. Has zero knowledge of agent internals — just a checkpoint ID, entry point path, and CLI args.
 
 ## Elasticity API
 
@@ -38,11 +38,11 @@ Two surfaces — external (control plane) and internal (from inside the VM via i
 ### External API (from your backend)
 
 ```
-PUT /api/sandboxes/:id/limits
+POST /api/sandboxes/:id/scale
 {"memoryMB": 8192}
 ```
 
-Header: `X-API-Key`. Memory change is live — no reboot. CPU auto-scales with memory (1 vCPU per 1 GB).
+Header: `X-API-Key`. Memory change is live — no reboot. CPU auto-scales with memory.
 
 ### Internal API (from inside the sandbox)
 

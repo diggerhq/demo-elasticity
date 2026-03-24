@@ -10,7 +10,15 @@ webhook.post("/webhooks/github", async (c) => {
   const body = await c.req.text();
   const sig = c.req.header("x-hub-signature-256") ?? "";
 
-  if (!(await webhooks.verify(body, sig))) return c.text("bad signature", 401);
+  try {
+    if (!(await webhooks.verify(body, sig))) {
+      console.error("Webhook signature mismatch");
+      return c.text("bad signature", 401);
+    }
+  } catch (e: any) {
+    console.error("Webhook verify error:", e.message);
+    return c.text("bad signature", 401);
+  }
 
   const event = c.req.header("x-github-event");
   if (event !== "issue_comment") return c.text("ignored", 200);
