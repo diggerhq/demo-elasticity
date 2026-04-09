@@ -38,7 +38,7 @@ POST /v1/agents
   "display_name": "Issue Resolver",
   "config": {
     "snapshot": "rust-agent-v1",
-    "entrypoint": "node /workspace/agent/dist/index.js --repo $REPO --issue $ISSUE_NUMBER",
+    "entrypoint": "node /workspace/agent/dist/index.js",
     "env": {
       "CARGO_BUILD_JOBS": "1"
     },
@@ -113,7 +113,7 @@ app.post("/webhook/github", async (c) => {
   // Create session — fire and forget
   await fetch(`${PLATFORM_API}/v1/agents/issue-resolver/sessions`, {
     method: "POST",
-    headers: { "Authorization": `Bearer ${PLATFORM_API_KEY}` },
+    headers: { "X-API-Key": PLATFORM_API_KEY },
     body: JSON.stringify({
       input: { repo: `${owner}/${repo}`, issue_number, ... }
     })
