@@ -1,6 +1,8 @@
 import "dotenv/config";
-import { Image } from "@opencomputer/sdk/dist/image.js";
-import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
+// @ts-ignore — files exist but aren't in package exports
+import { Image } from "../node_modules/@opencomputer/sdk/dist/image.js";
+// @ts-ignore
+import { Snapshots } from "../node_modules/@opencomputer/sdk/dist/snapshot.js";
 
 const apiKey = process.env.OPENCOMPUTER_API_KEY!;
 const apiUrl = process.env.OPENCOMPUTER_API_URL!;

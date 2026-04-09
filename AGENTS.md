@@ -25,9 +25,23 @@ The agent uses the elasticity API from inside the sandbox: when a build OOMs, it
 
 **Why real code, not prompt-only**: OpenComputer's `sandbox.agent.start()` accepts a system prompt and runs a managed agent loop inside the VM. We deliberately don't use that here. The demo should show the pattern real users follow: build an agent as code using the SDK, then deploy it to infrastructure. Baking the agent framework into the deployment platform and having users ship prompts instead of applications conflates two concerns — it's like if a PaaS required you to use its built-in web framework instead of bringing your own. The agent should be a portable program that happens to run in a sandbox.
 
-### 3. `api/` — Event Handler / Orchestration
+### 3. `api/` — Webhook Handler
 
-Receives GitHub webhooks (`issue_comment.created`), filters for `@myagent` mentions, creates an OpenComputer sandbox from the agent's pre-built snapshot (starting at 2 GB — deliberately undersized for compilation), and runs the agent. Posts status updates back to the issue thread. Has zero knowledge of agent internals — just a checkpoint ID, entry point path, and CLI args.
+Receives GitHub webhooks (`issue_comment.created`), filters for `@myagent` mentions, and creates a **Session** via the [sessions-api](../sessions-api/) platform API. That's it — no OC SDK, no sandbox lifecycle, no checkpoint IDs, no cleanup logic. The entire handler is one HTTP call:
+
+```typescript
+await fetch(`${PLATFORM_API}/v1/agents/issue-resolver/sessions`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-API-Key": API_KEY },
+  body: JSON.stringify({
+    input: { repo: "acme/backend", issue_number: 42 },
+  }),
+});
+```
+
+The platform creates the sandbox, injects secrets, writes the input file, runs the entrypoint, and destroys the sandbox when it exits. The webhook handler doesn't need to know anything about sandboxes.
+
+**Setup**: `npm run setup` registers the `issue-resolver` agent and its secrets with the platform API (one-time).
 
 ## Elasticity API
 

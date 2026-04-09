@@ -38,13 +38,13 @@ await run(
 
 // Step 3: gh CLI
 await run(
-  'type gh >/dev/null 2>&1 || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list && apt-get update && apt-get install -y gh)',
+  'type gh >/dev/null 2>&1 || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list && sudo apt-get update && sudo apt-get install -y gh)',
   "Install gh CLI"
 );
 
 // Step 4: Claude Code CLI (required by @anthropic-ai/claude-agent-sdk)
 await run(
-  "npm install -g @anthropic-ai/claude-code",
+  "sudo npm install -g @anthropic-ai/claude-code",
   "Install Claude Code CLI"
 );
 
@@ -58,20 +58,26 @@ await sandbox.files.write("/workspace/agent/prompt.md", readFileSync("prompt.md"
 await sandbox.files.write("/workspace/agent/src/index.ts", readFileSync("src/index.ts", "utf-8"));
 console.log("✓ Files uploaded");
 
-// Step 6: Install agent deps and build
+// Verify upload
 await run(
-  "export RUSTUP_HOME=/workspace/.rustup CARGO_HOME=/workspace/.cargo PATH=/workspace/.cargo/bin:$PATH && cd /workspace/agent && npm install && npm run build",
+  "ls -la /workspace/agent/ && cat /workspace/agent/package.json | head -5",
+  "Verify upload"
+);
+
+// Step 6: Install agent deps and build (chown because files.write creates as root)
+await run(
+  "sudo chown -R sandbox:sandbox /workspace/agent && export RUSTUP_HOME=/workspace/.rustup CARGO_HOME=/workspace/.cargo PATH=/workspace/.cargo/bin:$PATH && cd /workspace/agent && npm install && npm run build",
   "Install agent deps + build"
 );
 
-// Step 7: Set environment
+// Step 7: Set environment (non-fatal — env vars are passed via exec.start anyway)
 await run(
-  'echo \'export RUSTUP_HOME=/workspace/.rustup CARGO_HOME=/workspace/.cargo PATH=/workspace/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\' >> /root/.bashrc',
-  "Set PATH"
+  'echo \'export RUSTUP_HOME=/workspace/.rustup CARGO_HOME=/workspace/.cargo PATH=/workspace/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\' | sudo tee -a /root/.bashrc > /dev/null',
+  "Set PATH", true
 );
 await run(
-  'echo \'export RUST_BACKTRACE=1\' >> /root/.bashrc && echo \'export AGENT_WORKDIR=/workspace\' >> /root/.bashrc',
-  "Set env vars"
+  'echo \'export RUST_BACKTRACE=1\' | sudo tee -a /root/.bashrc > /dev/null && echo \'export AGENT_WORKDIR=/workspace\' | sudo tee -a /root/.bashrc > /dev/null',
+  "Set env vars", true
 );
 
 // Step 8: Checkpoint — wait for it to be ready before killing sandbox

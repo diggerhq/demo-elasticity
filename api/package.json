@@ -5,13 +5,13 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "setup": "tsx src/setup.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1",
     "@octokit/rest": "^21",
     "@octokit/webhooks": "^13",
-    "@opencomputer/sdk": "file:../../opencomputer/sdks/typescript",
     "dotenv": "^17.3.1",
     "hono": "^4"
   },

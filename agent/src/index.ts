@@ -8,16 +8,28 @@ import { tmpdir } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const { values } = parseArgs({
-  options: {
-    repo:  { type: "string" },
-    issue: { type: "string" },
-  },
-  strict: true,
-});
+let repo: string | undefined;
+let issue: string | undefined;
 
-if (!values.repo || !values.issue) {
+if (process.env.AGENT_INPUT_PATH) {
+  const input = JSON.parse(readFileSync(process.env.AGENT_INPUT_PATH, "utf-8"));
+  repo = input.repo;
+  issue = String(input.issue_number);
+} else {
+  const { values } = parseArgs({
+    options: {
+      repo:  { type: "string" },
+      issue: { type: "string" },
+    },
+    strict: true,
+  });
+  repo = repo;
+  issue = issue;
+}
+
+if (!repo || !issue) {
   console.error("Usage: index.ts --repo owner/repo --issue 42");
+  console.error("  or set AGENT_INPUT_PATH to a JSON file with { repo, issue_number }");
   process.exit(1);
 }
 
@@ -30,10 +42,10 @@ const stream = query({
   prompt: [
     `Resolve this GitHub issue.`,
     ``,
-    `Repository: ${values.repo}`,
-    `Issue number: ${values.issue}`,
+    `Repository: ${repo}`,
+    `Issue number: ${issue}`,
     ``,
-    `Start by running: gh issue view ${values.issue} --repo ${values.repo}`,
+    `Start by running: gh issue view ${issue} --repo ${repo}`,
   ].join("\n"),
   options: {
     model: "claude-sonnet-4-6",
