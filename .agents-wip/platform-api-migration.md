@@ -143,16 +143,24 @@ That's it. ~50 lines. No OC SDK, no sandbox lifecycle, no checkpoint IDs, no cle
 - `ingest-rs/` — unchanged. Still the compilation target.
 - Elasticity flow — unchanged. Agent detects OOM, queries limits, scales up, retries, scales down. The metadata service API is the same.
 
-## Input Wiring (Open Question)
+## Input Wiring
 
-How does the agent receive the `input` JSON from session creation?
+Resolved: platform writes `session.input` to `/tmp/agent_input.json` and sets `AGENT_INPUT_PATH` env var. Agent reads the file. Same convention as agents-api.
 
-Options:
-1. **Environment variables**: platform sets `AGENT_INPUT` or writes to `AGENT_INPUT_PATH`. Agent reads it. Simple, matches agents-api pattern.
-2. **File injection**: platform writes `input.json` to a known path before running entrypoint. Agent reads file.
-3. **CLI args**: platform appends input fields as CLI args to entrypoint. Fragile.
+```
+Platform writes:  /tmp/agent_input.json
+Platform sets:    AGENT_INPUT_PATH=/tmp/agent_input.json
+Agent reads:      JSON.parse(fs.readFileSync(process.env.AGENT_INPUT_PATH))
+```
 
-Option 1 or 2. TBD — should align with whatever convention agents-api already uses (it uses `AGENT_INPUT_PATH` pointing to a staged JSON file).
+The agent entrypoint changes from CLI args to reading the input file:
+```json
+// Before: "entrypoint": "node /workspace/agent/dist/index.js --repo acme/backend --issue 42"
+// After:  "entrypoint": "node /workspace/agent/dist/index.js"
+// Agent reads repo + issue_number from AGENT_INPUT_PATH
+```
+
+Agent writes results to `AGENT_RESULT_PATH=/tmp/agent_result.json` before exiting. Platform reads it and stores as `session.result`.
 
 ## Migration Steps
 
