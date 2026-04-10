@@ -23,8 +23,8 @@ if (process.env.AGENT_INPUT_PATH) {
     },
     strict: true,
   });
-  repo = repo;
-  issue = issue;
+  repo = values.repo;
+  issue = values.issue;
 }
 
 if (!repo || !issue) {
