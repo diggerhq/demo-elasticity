@@ -95,6 +95,12 @@ curl -s http://169.254.169.254/v1/metadata
 
 See `elasticity.md` for the full test script exercising both APIs.
 
+## Hard rules
+
+**NEVER force push.** `git push --force`, `git push -f`, and
+`git push --force-with-lease` are forbidden. No exceptions, all branches.
+Make a new commit instead.
+
 ## Conventions
 
 - **Happy paths only**: This is a demo project. Don't add fallbacks, backwards compatibility shims, or defensive error handling. If something fails, it fails. Keep the code simple and direct.
