@@ -1,0 +1,23 @@
+{
+  "name": "demo-elasticity-api",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "setup": "tsx src/setup.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1",
+    "@octokit/rest": "^21",
+    "@octokit/webhooks": "^13",
+    "dotenv": "^17.3.1",
+    "hono": "^4"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}
